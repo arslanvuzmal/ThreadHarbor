@@ -1,13 +1,13 @@
-import os
 import shutil
 import subprocess
+from pathlib import Path
 
 
 def test_dockerfile_and_compose_structure() -> None:
     """Verifies that the Dockerfile and docker compose files exist and have required production directives."""
     # Check Dockerfile
-    assert os.path.exists("Dockerfile")
-    with open("Dockerfile") as f:
+    assert Path("Dockerfile").exists()
+    with Path("Dockerfile").open() as f:
         dockerfile_content = f.read()
 
     assert "FROM python:3.11-slim AS builder" in dockerfile_content
@@ -17,8 +17,8 @@ def test_dockerfile_and_compose_structure() -> None:
     assert "uvicorn" in dockerfile_content
 
     # Check docker-compose.yml
-    assert os.path.exists("docker-compose.yml")
-    with open("docker-compose.yml") as f:
+    assert Path("docker-compose.yml").exists()
+    with Path("docker-compose.yml").open() as f:
         compose_content = f.read()
     assert "redis:" in compose_content
     assert "qdrant:" in compose_content
@@ -27,8 +27,8 @@ def test_dockerfile_and_compose_structure() -> None:
     assert "healthcheck:" in compose_content
 
     # Check docker-compose.prod.yml
-    assert os.path.exists("infra/docker-compose.prod.yml")
-    with open("infra/docker-compose.prod.yml") as f:
+    assert Path("infra/docker-compose.prod.yml").exists()
+    with Path("infra/docker-compose.prod.yml").open() as f:
         prod_compose_content = f.read()
     assert "restart: unless-stopped" in prod_compose_content
     assert "limits:" in prod_compose_content
@@ -43,7 +43,7 @@ def test_docker_build_integration() -> None:
 
     # Check if docker daemon is running
     try:
-        subprocess.run(["docker", "info"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(["docker", "info"], check=True, capture_output=True)
     except (subprocess.CalledProcessError, FileNotFoundError):
         # Docker daemon is not running or accessible, skip
         return
