@@ -118,6 +118,20 @@ async def receive_agent_message(
     phone_number_id = session.phone_number_id or "default_phone_number_id"
 
     if payload.action == "reply":
+        from src.bot.session import SessionManager
+
+        # Ensure raw agent messages conform to strict 24-hour interaction window rules
+        if not SessionManager.is_within_24h_window(payload.session_id):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": {
+                        "code": 400,
+                        "message": "Cannot send free-form reply: session is outside the 24-hour interaction window.",
+                    }
+                },
+            )
+
         # Format the agent's response using the whatsapp_formatter
         formatted_reply = whatsapp_formatter(payload.text)
 

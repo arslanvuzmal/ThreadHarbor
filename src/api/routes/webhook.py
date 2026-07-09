@@ -2,16 +2,13 @@ import json
 from typing import Any
 
 import httpx
-import redis.asyncio as aioredis
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from src.api.dependencies import get_app_settings
-from src.bot.session import SessionManager
-from src.intelligence.llm_client import LLMClient
-from src.intelligence.rag import RAGPipeline
+from src.api.dependencies import get_app_settings, get_handoff_client
+from src.handoff.client import BaseHandoffClient
 from src.orchestrator.engine import Orchestrator
-from src.utils import pii_masker, whatsapp_formatter
+from src.utils import pii_masker
 from src.utils.config import Settings
 from src.utils.logger import get_logger
 from src.utils.whatsapp_signature import verify_signature
@@ -21,90 +18,149 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
-async def process_and_reply_background(
-    sender_wa_id: str,
-    user_input: str,
-    phone_number_id: str,
-    settings: Settings,
-) -> None:
-    """Performs the full agentic conversational loop and delivers the response asynchronously.
+def get_orchestrator(
+    handoff_client: BaseHandoffClient = Depends(get_handoff_client),  # noqa: B008
+) -> Orchestrator:
+    """Dependency to provide the shared Orchestrator instance.
 
-    Runs in FastAPI BackgroundTasks to prevent Meta timeout issues.
+    Args:
+        handoff_client: BaseHandoffClient instance.
+
+    Returns:
+        Orchestrator instance.
     """
-    redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+    return Orchestrator(handoff_client=handoff_client)
+
+
+async def process_incoming_message(
+    sender_wa_id: str,
+    phone_number_id: str,
+    text_content: str,
+    orchestrator: Orchestrator,
+    access_token: str,
+    background_tasks: BackgroundTasks,
+    media_id: str | None = None,
+    media_mime_type: str | None = None,
+) -> None:
+    """Background task to handle user messages through the Orchestrator.
+
+    Avoids blocking the HTTP response thread.
+
+    Args:
+        sender_wa_id: The WhatsApp ID of the sender.
+        phone_number_id: The phone number ID from Meta's webhook.
+        text_content: Message text.
+        orchestrator: The Orchestrator engine.
+        access_token: WhatsApp Access Token.
+        background_tasks: FastAPI BackgroundTasks runner.
+        media_id: Optional ID of any uploaded media attachment.
+        media_mime_type: Optional mime type of the media attachment.
+    """
     try:
-        session_manager = SessionManager(redis_client)
-        llm_client = LLMClient(
-            api_key=settings.OPENAI_API_KEY,
-            chat_model=settings.LLM_CHAT_MODEL,
-            embedding_model=settings.LLM_EMBEDDING_MODEL,
+        import time
+
+        from src.bot.session import SessionManager
+        from src.utils.whatsapp_media import MediaManager
+        from src.utils.whatsapp_templates import TemplateManager
+
+        # Check window compliance BEFORE updating it for the new incoming message
+        is_compliant = SessionManager.is_within_24h_window(sender_wa_id)
+
+        # Load and update session with correct phone_number_id and update the interaction timestamp (24h compliance)
+        session = await orchestrator.get_or_create_session(sender_wa_id)
+        session.phone_number_id = phone_number_id
+        session.last_interaction_timestamp = time.time()
+        await orchestrator.save_session(session)
+
+        # Handle media download asynchronously
+        media_bytes: bytes | None = None
+        if media_id:
+            try:
+                media_manager = MediaManager()
+                media_bytes, downloaded_mime = await media_manager.download_media(media_id)
+                if downloaded_mime:
+                    media_mime_type = downloaded_mime
+            except Exception as e:
+                logger.error("Failed to download media in webhook process", media_id=media_id, error=str(e))
+                text_content += f" (Media attachment download failed: {e!s})"
+
+        # Handle message in orchestrator
+        bot_response = await orchestrator.handle_message(
+            sender_wa_id,
+            text_content,
+            background_tasks,
+            media_bytes=media_bytes,
+            mime_type=media_mime_type,
         )
-        rag_pipeline = RAGPipeline(
-            llm_client=llm_client,
-            qdrant_url=settings.QDRANT_URL,
-            api_key=settings.QDRANT_API_KEY,
-        )
-        orchestrator = Orchestrator(
-            session_manager=session_manager,
-            llm_client=llm_client,
-            rag_pipeline=rag_pipeline,
-        )
 
-        # 1. Process conversational logic and agentic loop
-        bot_response = await orchestrator.process_message(sender_wa_id, user_input)
+        # If there is response text, verify 24h compliance window before sending
+        if bot_response.text:
+            if not is_compliant:
+                logger.warning(
+                    "Attempted to send message outside 24h window; falling back to order_update template",
+                    session_id=sender_wa_id,
+                )
+                template_manager = TemplateManager()
+                await template_manager.send_template_message(
+                    recipient_wa_id=sender_wa_id,
+                    template_name="order_update",
+                    phone_number_id=phone_number_id,
+                )
+            else:
+                await send_whatsapp_reply(
+                    phone_number_id=phone_number_id,
+                    to=sender_wa_id,
+                    text_body=bot_response.text,
+                    access_token=access_token,
+                )
+    except Exception as e:
+        logger.exception("Error processing incoming message in background", error=str(e))
 
-        # 2. Check 24-hour interaction window policy
-        is_active_window = await session_manager.is_within_24h_window(sender_wa_id)
-        if not is_active_window:
-            logger.warning(
-                "User is outside the active 24-hour window. Cannot send free-form message.",
-                session_id=sender_wa_id,
-            )
 
-        # 3. Format message based on response content
-        if bot_response.buttons:
-            payload = whatsapp_formatter.format_interactive_buttons(
-                recipient_wa_id=sender_wa_id,
-                text=bot_response.text,
-                buttons=bot_response.buttons,
-            )
-        else:
-            payload = whatsapp_formatter.format_text_message(
-                recipient_wa_id=sender_wa_id,
-                text=bot_response.text,
-            )
+async def send_whatsapp_reply(
+    phone_number_id: str,
+    to: str,
+    text_body: str,
+    access_token: str,
+) -> None:
+    """Asynchronously sends a reply back to WhatsApp using the Graph API.
 
-        # 4. Outbound Graph API post
-        url = f"https://graph.facebook.com/v21.0/{phone_number_id}/messages"
-        headers = {
-            "Authorization": f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}",
-            "Content-Type": "application/json",
-        }
+    Args:
+        phone_number_id: The WhatsApp Phone Number ID extracted from payload.
+        to: The sender's WhatsApp ID (wa_id).
+        text_body: The reply text to send.
+        access_token: The WHATSAPP_ACCESS_TOKEN configuration.
+    """
+    url = f"https://graph.facebook.com/v21.0/{phone_number_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "text",
+        "text": {"body": text_body},
+    }
 
+    try:
         async with httpx.AsyncClient() as client:
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             logger.info(
-                "WhatsApp reply dispatched successfully in background",
+                "WhatsApp reply sent successfully",
                 phone_number_id=phone_number_id,
-                to=sender_wa_id,
+                to=to,
                 status_code=response.status_code,
             )
-
     except Exception as e:
         logger.error(
-            "Failed processing and sending response in background task",
-            sender=sender_wa_id,
+            "Failed to send WhatsApp reply",
+            phone_number_id=phone_number_id,
+            to=to,
             error=str(e),
         )
-    finally:
-        try:
-            if hasattr(redis_client, "aclose") and callable(redis_client.aclose):
-                await redis_client.aclose()
-            elif hasattr(redis_client, "close") and callable(redis_client.close):
-                redis_client.close()
-        except Exception:
-            pass
 
 
 @router.get("/webhook", response_class=PlainTextResponse)
@@ -114,7 +170,17 @@ async def verify_webhook(
     hub_challenge: str = Query(None, alias="hub.challenge"),
     settings: Settings = Depends(get_app_settings),  # noqa: B008
 ) -> str:
-    """Meta Webhook Verification GET endpoint."""
+    """Meta Webhook Verification GET endpoint.
+
+    Args:
+        hub_mode: The hub.mode query parameter.
+        hub_verify_token: The hub.verify_token query parameter.
+        hub_challenge: The hub.challenge query parameter.
+        settings: Application Settings containing VERIFY_TOKEN.
+
+    Returns:
+        The challenge token if valid, otherwise raises a 403 HTTP Exception.
+    """
     if hub_mode == "subscribe" and hub_verify_token == settings.WHATSAPP_VERIFY_TOKEN:
         if hub_challenge is not None:
             return hub_challenge
@@ -148,10 +214,22 @@ async def receive_webhook(
     settings: Settings = Depends(get_app_settings),  # noqa: B008
     orchestrator: Orchestrator = Depends(get_orchestrator),  # noqa: B008
 ) -> dict[str, Any]:
-    """Meta Webhook POST endpoint to receive messages, routing them to the background task executor."""
+    """Meta Webhook GET endpoint to receive messages.
+
+    Accepts raw bytes payload for X-Hub-Signature-256 verification.
+
+    Args:
+        request: FastAPI Request instance.
+        background_tasks: FastAPI BackgroundTasks instance to perform async tasks.
+        x_hub_signature_256: The Meta signature header.
+        settings: Application Settings containing secrets.
+
+    Returns:
+        A JSON dictionary indicating success.
+    """
     body_bytes = await request.body()
 
-    # Step 1: Verify signature
+    # Step 1: Verify the signature
     if not verify_signature(body_bytes, x_hub_signature_256, settings.WHATSAPP_APP_SECRET):
         logger.warning("Signature verification failed", signature=x_hub_signature_256)
         raise HTTPException(
@@ -189,10 +267,11 @@ async def receive_webhook(
             },
         ) from e
 
-    # Step 3: Extract message values
+    # Step 3: Extract the message/interactive content and process
     try:
         entry = payload.get("entry", [])
         if not entry:
+            # Not a typical WhatsApp notification, but return 200 OK
             return {"status": "success"}
 
         changes = entry[0].get("changes", [])
@@ -205,6 +284,7 @@ async def receive_webhook(
 
         messages = value.get("messages", [])
         if not messages:
+            # Might be a status update or other update, ignore/return 200 OK
             return {"status": "success"}
 
         message = messages[0]
@@ -212,20 +292,39 @@ async def receive_webhook(
 
         text_content = None
         interactive_content = None
+        media_id = None
+        media_mime_type = None
 
         if msg_type == "text":
             text_content = message.get("text", {}).get("body")
         elif msg_type == "interactive":
-            interactive_content = message.get("interactive")
-            if interactive_content:
+            interactive_content = message.get("interactive", {})
+            interactive_type = interactive_content.get("type")
+            if interactive_type == "nfm_reply":
+                nfm_reply = interactive_content.get("nfm_reply", {})
+                response_json_str = nfm_reply.get("response_json", "{}")
+                try:
+                    parsed_json = json.loads(response_json_str)
+                    text_content = f"User submitted Flow Data: {json.dumps(parsed_json)}"
+                except Exception:
+                    text_content = f"User submitted Flow Data: {response_json_str}"
+            else:
                 text_content = json.dumps(interactive_content)
+        elif msg_type in ["image", "document", "audio"]:
+            media_info = message.get(msg_type, {})
+            media_id = media_info.get("id")
+            media_mime_type = media_info.get("mime_type")
+            caption = media_info.get("caption")
+            filename = media_info.get("filename")
+            text_content = caption or filename or f"Uploaded {msg_type}"
 
-        if text_content is None and interactive_content is None:
+        # Skip and ignore other types (statuses, errors, etc.)
+        if text_content is None and interactive_content is None and media_id is None:
             return {"status": "success"}
 
         sender_wa_id = message.get("from")
 
-        # Step 4: Mask and log message body immediately
+        # Step 4: Log the incoming message (Must use pii_masker.mask() before logging)
         masked_text = pii_masker.mask(text_content or "")
         logger.info(
             "Received WhatsApp message",
@@ -244,18 +343,13 @@ async def receive_webhook(
                 orchestrator,
                 settings.WHATSAPP_ACCESS_TOKEN,
                 background_tasks,
-        # Step 5: Queue full agentic process and response dispatch to BackgroundTasks
-        if phone_number_id and sender_wa_id:
-            background_tasks.add_task(
-                process_and_reply_background,
-                sender_wa_id,
-                text_content or "",
-                phone_number_id,
-                settings,
+                media_id,
+                media_mime_type,
             )
 
     except Exception as e:
-        logger.error("Error parsing webhook payload structure", error=str(e))
+        logger.error("Error processing webhook payload", error=str(e))
+        # Keep returning 200 to prevent Meta from retrying and flooding us
         return {"status": "success"}
 
     return {"status": "success"}

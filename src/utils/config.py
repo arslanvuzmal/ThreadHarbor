@@ -14,13 +14,7 @@ class Settings(BaseSettings):
     LANGFUSE_PUBLIC_KEY: str | None = None
     LANGFUSE_SECRET_KEY: str | None = None
     LANGFUSE_HOST: str = "https://cloud.langfuse.com"
-
-    # Phase 03 additions
-    OPENAI_API_KEY: str
-    QDRANT_URL: str = "http://localhost:6333"
-    QDRANT_API_KEY: str | None = None
-    LLM_CHAT_MODEL: str = "gpt-4o-mini"
-    LLM_EMBEDDING_MODEL: str = "text-embedding-3-small"
+    MAX_MEDIA_SIZE_MB: int = 5
 
     model_config = SettingsConfigDict(
         env_file=".env",

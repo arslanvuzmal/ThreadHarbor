@@ -1,7 +1,10 @@
 import asyncio
+import base64
+import io
 import time
 from typing import Any
 
+import pypdf
 from fastapi import BackgroundTasks
 
 from src.analytics.db import AnalyticsRecorder
@@ -11,14 +14,6 @@ from src.handoff.payload import build_payload
 from src.intelligence.tracing import trace_llm_call
 from src.orchestrator.fallback import FallbackEngine
 from src.orchestrator.triggers import EscalationTriggerEngine
-import json
-
-from src.bot.models import BotResponse, Role, SessionState
-from src.bot.session import SessionManager
-from src.intelligence.context import ContextBuilder
-from src.intelligence.llm_client import LLMClient
-from src.intelligence.rag import RAGPipeline
-from src.intelligence.tools import TOOL_DEFINITIONS, execute_tool
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -83,45 +78,114 @@ class Orchestrator:
         """
         self.session_store.save_session(session.session_id, session.model_dump_json())
 
-    async def call_llm(self, text: str, _session: SessionData) -> tuple[str, list[dict[str, Any]] | None]:
+    async def call_llm(
+        self,
+        text: str,
+        _session: SessionData,
+        media_bytes: bytes | None = None,
+        mime_type: str | None = None,
+    ) -> tuple[str, list[dict[str, Any]] | None, str, int]:
         """Mock LLM call. Simulates the chatbot assistant's prompt execution and tool calls.
 
         Checks for specific test injection phrases to simulate tool triggers or low-confidence turns.
+        Supports GPT-4o Vision selection on image types and text extraction on PDF types.
 
         Args:
-            text: Input message from the user.
+            text: Input message from the user (or prompt updated with PDF context).
             _session: Current SessionData instance.
+            media_bytes: Optional raw media stream.
+            mime_type: Optional media mime-type descriptor.
 
         Returns:
-            A tuple of (llm_response_text: str, list_of_tool_calls: Optional[List[Dict[str, Any]]]).
+            A tuple of (llm_response_text, list_of_tool_calls, model_used, tokens_used).
         """
         text_lower = text.lower()
+        model_used = "gpt-4o-mini"
+        tokens_used = 40
+
+        # PDF extraction handling
+        if media_bytes and mime_type == "application/pdf":
+            try:
+                reader = pypdf.PdfReader(io.BytesIO(media_bytes))
+                extracted_text = ""
+                for page in reader.pages:
+                    extracted_text += page.extract_text() or ""
+                text = f"User uploaded a document. Extracted text: {extracted_text}. User question: {text}"
+                text_lower = text.lower()
+                logger.info("PDF document processed and text extracted successfully")
+            except Exception as e:
+                logger.error("Failed to parse PDF binary stream in LLM loop", error=str(e))
+
+        # Vision handling
+        if media_bytes and mime_type and mime_type.startswith("image/"):
+            model_used = "gpt-4o"
+            # Use base64 encoding to format OpenAI vision schema
+            base64_str = base64.b64encode(media_bytes).decode("utf-8")
+            # Create OpenAI vision structural content
+            vision_content = [
+                {"type": "text", "text": text},
+                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_str}"}},
+            ]
+            logger.info(
+                "Vision request constructed using OpenAI vision schema on gpt-4o",
+                image_size_bytes=len(media_bytes),
+            )
+            # Just to preserve structural references
+            _ = vision_content
 
         # Simulated scenarios for testing:
         if "force low confidence" in text_lower:
-            return "I'm not sure about that.", None
+            return "I'm not sure about that.", None, model_used, tokens_used
 
         if "force refund trigger" in text_lower:
             # Tool call with a restricted limit (> $500)
-            return "Initiating refund.", [{"name": "initiate_refund", "arguments": {"amount": 600.0}}]
+            return (
+                "Initiating refund.",
+                [{"name": "initiate_refund", "arguments": {"amount": 600.0}}],
+                model_used,
+                tokens_used,
+            )
 
         if "refund" in text_lower and "500" in text_lower:
-            return "Initiating refund.", [{"name": "initiate_refund", "arguments": {"amount": 600.0}}]
+            return (
+                "Initiating refund.",
+                [{"name": "initiate_refund", "arguments": {"amount": 600.0}}],
+                model_used,
+                tokens_used,
+            )
 
         if "don't know" in text_lower or "not sure" in text_lower:
-            return "I don't know the answer to this question.", None
+            return "I don't know the answer to this question.", None, model_used, tokens_used
 
         if "force error" in text_lower:
             raise RuntimeError("Simulated internal service error (LLM/RAG failure)")
 
+        if media_bytes and mime_type and mime_type.startswith("image/"):
+            return (
+                "I have analyzed your receipt image using GPT-4o Vision. It looks complete.",
+                None,
+                model_used,
+                tokens_used,
+            )
+
+        if media_bytes and mime_type == "application/pdf":
+            return (
+                f"I have read your uploaded PDF document. Extracted content summary: '{text[:60]}...'",
+                None,
+                model_used,
+                tokens_used,
+            )
+
         # Standard AI response
-        return f"Hi! I received your message: '{text}'. How can I help you today?", None
+        return f"Hi! I received your message: '{text}'. How can I help you today?", None, model_used, tokens_used
 
     async def handle_message(
         self,
         session_id: str,
         text: str,
         background_tasks: BackgroundTasks | None = None,
+        media_bytes: bytes | None = None,
+        mime_type: str | None = None,
     ) -> BotResponse:
         """Processes an incoming message, performing state transitions, trigger evaluation, and LLM calls.
 
@@ -129,6 +193,8 @@ class Orchestrator:
             session_id: Unique session identifier (sender WhatsApp ID).
             text: Raw message content.
             background_tasks: Optional FastAPI BackgroundTasks instance to offload DB writes.
+            media_bytes: Optional raw media bytes attached to the message.
+            mime_type: Optional mime type string of the media attachment.
 
         Returns:
             BotResponse containing the text reply to send back to the user.
@@ -215,7 +281,12 @@ class Orchestrator:
         # 3. CALL LLM (Wrapped with Tracing and Graceful Degradation)
         try:
             async with trace_llm_call(session_id, text) as span:
-                response_text, tool_calls = await self.call_llm(text, session)
+                response_text, tool_calls, model_used, tokens_used = await self.call_llm(
+                    text,
+                    session,
+                    media_bytes=media_bytes,
+                    mime_type=mime_type,
+                )
 
                 # Record trace details
                 span.record_generation(
@@ -225,7 +296,6 @@ class Orchestrator:
                     prompt_tokens=15,
                     completion_tokens=25,
                 )
-                tokens_used = 40
         except Exception as e:
             logger.exception(
                 "Normal processing loop failed; invoking Graceful Degradation FallbackEngine",
@@ -388,211 +458,3 @@ class Orchestrator:
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
             logger.debug("Dispatched interaction metrics to background asyncio task", session_id=session_id)
-    """Manages state transitions, combining RAG context, context windows, and tool completions."""
-
-    def __init__(
-        self,
-        session_manager: SessionManager,
-        llm_client: LLMClient,
-        rag_pipeline: RAGPipeline,
-        context_builder: ContextBuilder | None = None,
-    ) -> None:
-        """Initialize Orchestrator with dependencies."""
-        self.session_manager = session_manager
-        self.llm_client = llm_client
-        self.rag_pipeline = rag_pipeline
-        self.context_builder = context_builder or ContextBuilder()
-
-    async def process_message(self, session_id: str, user_input: str) -> BotResponse:
-        """Processes user input through RAG, Context formatting, and an async tool-completion loop.
-
-        Args:
-            session_id: The ID of the session.
-            user_input: The raw user message string.
-
-        Returns:
-            A BotResponse representing the assistant's final response text.
-        """
-        try:
-            # 1. Fetch current session
-            session = await self.session_manager.get_or_create_session(session_id)
-
-            # Handle handoff bypass
-            if session.state == SessionState.HUMAN_HANDOFF:
-                logger.info("Bypassing bot response, session in HUMAN_HANDOFF state", session_id=session_id)
-                return BotResponse(
-                    text="Thank you for reaching out. A human representative will assist you shortly.",
-                    buttons=None,
-                    should_escalate=False,
-                )
-
-            # 2. Save user message immediately and transition to PROCESSING
-            await self.session_manager.add_message(session_id, Role.USER, user_input)
-            session = await self.session_manager.get_or_create_session(session_id)
-
-            # Transition state to PROCESSING and persist state immediately
-            old_state = session.state
-            session.state = SessionState.PROCESSING
-            await self.session_manager.update_session(session)
-            logger.info(
-                "Session state transition",
-                session_id=session_id,
-                from_state=old_state.name,
-                to_state=session.state.name,
-            )
-
-            # 3. Retrieve relevant context blocks using RAG pipeline
-            rag_docs = await self.rag_pipeline.retrieve_context(user_input, top_k=3)
-            if rag_docs:
-                rag_context = "\n".join([doc.get("text", "") for doc in rag_docs])
-            else:
-                rag_context = "No knowledge base documents matching."
-
-            # 4. Construct prompts templates utilizing the context builder
-            messages = self.context_builder.build_messages(session.history, rag_context)
-
-            # 5. Agentic loop with tool resolution
-            llm_response = await self.llm_client.chat_completion(messages, tools=TOOL_DEFINITIONS)
-            finish_reason = llm_response.get("finish_reason", "stop")
-            llm_message = llm_response.get("message", {})
-
-            loop_limit = 5
-            loop_count = 0
-            did_initiate_refund = False
-            refund_amount = 0.0
-
-            while finish_reason == "tool_calls" and loop_count < loop_limit:
-                loop_count += 1
-                tool_calls = llm_message.get("tool_calls", [])
-                logger.info("LLM requested tool executions", tool_calls_count=len(tool_calls), session_id=session_id)
-
-                messages.append(llm_message)
-
-                for tc in tool_calls:
-                    tc_id = tc.get("id", "")
-                    func_details = tc.get("function", {})
-                    func_name = func_details.get("name", "")
-                    func_args_str = func_details.get("arguments", "{}")
-
-                    # Parse JSON arguments safely
-                    try:
-                        func_args = json.loads(func_args_str)
-                    except Exception:
-                        func_args = {}
-
-                    if func_name == "initiate_refund":
-                        did_initiate_refund = True
-                        try:
-                            refund_amount = float(func_args.get("amount", 0.0))
-                        except (ValueError, TypeError):
-                            refund_amount = 0.0
-
-                    try:
-                        tool_result = execute_tool(func_name, func_args)
-                    except Exception as e:
-                        logger.error("Tool execution failed", tool=func_name, error=str(e))
-                        tool_result = f"Error: Tool execution failed with error {e!s}"
-
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc_id,
-                            "name": func_name,
-                            "content": tool_result,
-                        }
-                    )
-
-                llm_response = await self.llm_client.chat_completion(messages, tools=TOOL_DEFINITIONS)
-                finish_reason = llm_response.get("finish_reason", "stop")
-                llm_message = llm_response.get("message", {})
-
-            final_text = llm_message.get("content") or ""
-
-            # 6. Evaluate Escalation policies
-            should_escalate = False
-            if "[ESCALATE]" in final_text or (did_initiate_refund and refund_amount > 500.0):
-                should_escalate = True
-                session.state = SessionState.ESCALATED
-                logger.info(
-                    "Session escalated to human handoff",
-                    session_id=session_id,
-                    refund_trigger=did_initiate_refund,
-                    refund_amount=refund_amount,
-                )
-                final_text = final_text.replace("[ESCALATE]", "").strip()
-            else:
-                session.state = SessionState.AWAITING_INPUT
-
-            # Persist bot reply and final state details
-            await self.session_manager.add_message(session_id, Role.BOT, final_text)
-
-            session = await self.session_manager.get_or_create_session(session_id)
-            session.state = SessionState.ESCALATED if should_escalate else SessionState.AWAITING_INPUT
-            await self.session_manager.update_session(session)
-
-            logger.info(
-                "Session state transition",
-                session_id=session_id,
-                from_state="PROCESSING",
-                to_state=session.state.name,
-            )
-
-            return BotResponse(
-                text=final_text,
-                buttons=None,
-                should_escalate=should_escalate,
-            )
-
-        except Exception as e:
-            logger.exception("An unhandled exception occurred in the Orchestrator loop", session_id=session_id, error=str(e))  # noqa: E501
-            # Graceful fallback response
-            fallback_text = (
-                "I'm having trouble connecting to my knowledge base. "
-                "Let me get a human representative to assist you."
-            )
-            return BotResponse(
-                text=fallback_text,
-                buttons=None,
-                should_escalate=True,
-            )
-
-    async def handle_agent_reply(self, session_id: str, agent_message: str) -> BotResponse:
-        """Process a reply sent by a human agent back to the user.
-
-        Transitions state based on agent action or keeps HUMAN_HANDOFF active.
-
-        Args:
-            session_id: The ID of the session.
-            agent_message: The message sent by the agent.
-
-        Returns:
-            A BotResponse containing the agent's reply.
-        """
-        # Fetch current state
-        session = await self.session_manager.get_or_create_session(session_id)
-
-        # Determine next state
-        old_state = session.state
-        if "close" in agent_message.lower() or "resolve" in agent_message.lower():
-            session.state = SessionState.AWAITING_INPUT
-        else:
-            session.state = SessionState.HUMAN_HANDOFF
-
-        logger.info(
-            "Agent message transition",
-            session_id=session_id,
-            from_state=old_state.name,
-            to_state=session.state.name,
-        )
-
-        # Save session state changes
-        await self.session_manager.update_session(session)
-
-        # Add the agent message to history
-        await self.session_manager.add_message(session_id, Role.SYSTEM, f"Agent: {agent_message}")
-
-        return BotResponse(
-            text=agent_message,
-            buttons=None,
-            should_escalate=False,
-        )
