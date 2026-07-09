@@ -1,7 +1,9 @@
 import json
 from typing import Any
 
+import pytest
 import respx
+from fakeredis.aioredis import FakeRedis
 from fastapi.testclient import TestClient
 from httpx import Response
 
@@ -47,8 +49,9 @@ def test_get_webhook_missing_params(client: TestClient) -> None:
     assert response.status_code == 403
 
 
+@pytest.mark.asyncio
 @respx.mock
-def test_post_webhook_valid_text_message(
+async def test_post_webhook_valid_text_message(
     client: TestClient,
     signature_generator: Any,
 ) -> None:
@@ -95,17 +98,29 @@ def test_post_webhook_valid_text_message(
         return_value=Response(200, json={"message_id": "wamid.mocked"})
     )
 
-    response = client.post(
-        "/webhook",
-        content=body_bytes,
-        headers={"X-Hub-Signature-256": signature, "Content-Type": "application/json"},
-    )
+    # Use FakeRedis to back our route handler
+    import redis.asyncio as aioredis
+    original_from_url = aioredis.from_url
+    fake_redis = FakeRedis(decode_responses=True)
 
-    assert response.status_code == 200
-    assert response.json() == {"status": "success"}
+    def mock_from_url(*_args: Any, **_kwargs: Any) -> Any:
+        return fake_redis
 
-    # Assert that the route was called
-    assert route.called
+    aioredis.from_url = mock_from_url
+
+    try:
+        response = client.post(
+            "/webhook",
+            content=body_bytes,
+            headers={"X-Hub-Signature-256": signature, "Content-Type": "application/json"},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"status": "success"}
+        assert route.called
+    finally:
+        aioredis.from_url = original_from_url
+        await fake_redis.aclose()
 
 
 def test_post_webhook_invalid_signature(client: TestClient) -> None:
@@ -195,8 +210,9 @@ def test_post_webhook_status_update(
     assert response.json() == {"status": "success"}
 
 
+@pytest.mark.asyncio
 @respx.mock
-def test_post_webhook_interactive_message(
+async def test_post_webhook_interactive_message(
     client: TestClient,
     signature_generator: Any,
 ) -> None:
@@ -242,12 +258,25 @@ def test_post_webhook_interactive_message(
         return_value=Response(200, json={"message_id": "wamid.mocked"})
     )
 
-    response = client.post(
-        "/webhook",
-        content=body_bytes,
-        headers={"X-Hub-Signature-256": signature, "Content-Type": "application/json"},
-    )
+    import redis.asyncio as aioredis
+    original_from_url = aioredis.from_url
+    fake_redis = FakeRedis(decode_responses=True)
 
-    assert response.status_code == 200
-    assert response.json() == {"status": "success"}
-    assert route.called
+    def mock_from_url(*_args: Any, **_kwargs: Any) -> Any:
+        return fake_redis
+
+    aioredis.from_url = mock_from_url
+
+    try:
+        response = client.post(
+            "/webhook",
+            content=body_bytes,
+            headers={"X-Hub-Signature-256": signature, "Content-Type": "application/json"},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"status": "success"}
+        assert route.called
+    finally:
+        aioredis.from_url = original_from_url
+        await fake_redis.aclose()
