@@ -6,6 +6,7 @@ os.environ["WHATSAPP_APP_SECRET"] = "test_app_secret_abc"
 os.environ["WHATSAPP_ACCESS_TOKEN"] = "test_access_token_xyz"
 os.environ["REDIS_URL"] = "redis://localhost:6379/0"
 os.environ["LOG_LEVEL"] = "DEBUG"
+os.environ["OPENAI_API_KEY"] = "mock_openai_api_key_for_testing"
 
 import hmac
 from collections.abc import Generator
@@ -27,6 +28,7 @@ def mock_env_vars() -> Generator[None, None, None]:
     os.environ["WHATSAPP_ACCESS_TOKEN"] = "test_access_token_xyz"
     os.environ["REDIS_URL"] = "redis://localhost:6379/0"
     os.environ["LOG_LEVEL"] = "DEBUG"
+    os.environ["OPENAI_API_KEY"] = "mock_openai_api_key_for_testing"
     yield
     os.environ.clear()
     os.environ.update(old_env)
