@@ -1,92 +1,184 @@
+import json
+
 from src.bot.models import BotResponse, Role, SessionState
 from src.bot.session import SessionManager
+from src.intelligence.context import ContextBuilder
+from src.intelligence.llm_client import LLMClient
+from src.intelligence.rag import RAGPipeline
+from src.intelligence.tools import TOOL_DEFINITIONS, execute_tool
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
 class Orchestrator:
-    """Manages conversational state transition logic, user request routing, and human-in-the-loop handoff."""
+    """Manages state transitions, combining RAG context, context windows, and tool completions."""
 
-    def __init__(self, session_manager: SessionManager) -> None:
-        """Initialize the Orchestrator with a SessionManager."""
+    def __init__(
+        self,
+        session_manager: SessionManager,
+        llm_client: LLMClient,
+        rag_pipeline: RAGPipeline,
+        context_builder: ContextBuilder | None = None,
+    ) -> None:
+        """Initialize Orchestrator with dependencies."""
         self.session_manager = session_manager
+        self.llm_client = llm_client
+        self.rag_pipeline = rag_pipeline
+        self.context_builder = context_builder or ContextBuilder()
 
     async def process_message(self, session_id: str, user_input: str) -> BotResponse:
-        """Processes an incoming user message, transitions the conversational state, and returns a response.
+        """Processes user input through RAG, Context formatting, and an async tool-completion loop.
 
         Args:
             session_id: The ID of the session.
-            user_input: The raw message string sent by the user.
+            user_input: The raw user message string.
 
         Returns:
-            A BotResponse model instance containing text, optional buttons, and escalation flags.
+            A BotResponse representing the assistant's final response text.
         """
-        # 1. Fetch current session
-        session = await self.session_manager.get_or_create_session(session_id)
-        old_state = session.state
+        try:
+            # 1. Fetch current session
+            session = await self.session_manager.get_or_create_session(session_id)
 
-        # If user was human handoff, skip processing or route to human
-        if old_state == SessionState.HUMAN_HANDOFF:
-            return BotResponse(
-                text="A customer support representative will assist you shortly.",
-                should_escalate=False,
-            )
+            # Handle handoff bypass
+            if session.state == SessionState.HUMAN_HANDOFF:
+                logger.info("Bypassing bot response, session in HUMAN_HANDOFF state", session_id=session_id)
+                return BotResponse(
+                    text="Thank you for reaching out. A human representative will assist you shortly.",
+                    buttons=None,
+                    should_escalate=False,
+                )
 
-        # 2. Add user input to history
-        await self.session_manager.add_message(session_id, Role.USER, user_input)
+            # 2. Save user message immediately and transition to PROCESSING
+            await self.session_manager.add_message(session_id, Role.USER, user_input)
+            session = await self.session_manager.get_or_create_session(session_id)
 
-        # 3. Transition to PROCESSING state
-        session.state = SessionState.PROCESSING
-        logger.info(
-            "Session state transition",
-            session_id=session_id,
-            old_state=old_state,
-            new_state=session.state,
-        )
-
-        # 4. Phase 2 Dummy Intelligence keyword routing check
-        cleaned_input = user_input.lower()
-        should_escalate = False
-        response_text = ""
-
-        if any(keyword in cleaned_input for keyword in ["agent", "human", "refund"]):
-            should_escalate = True
-            session.state = SessionState.ESCALATED
-            response_text = "I am escalating your request to a human representative. Someone will assist you shortly."
-            logger.info(
-                "Session state transition (Escalation triggered)",
-                session_id=session_id,
-                old_state=old_state,
-                new_state=session.state,
-            )
-        else:
-            session.state = SessionState.AWAITING_INPUT
-            response_text = f"I am processing your request: {user_input}. (AI will be added in Phase 3)"
+            # Transition state to PROCESSING and persist state immediately
+            old_state = session.state
+            session.state = SessionState.PROCESSING
+            await self.session_manager.update_session(session)
             logger.info(
                 "Session state transition",
                 session_id=session_id,
-                old_state=old_state,
-                new_state=session.state,
+                from_state=old_state.name,
+                to_state=session.state.name,
             )
 
-        # 5. Add bot message to history
-        await self.session_manager.add_message(session_id, Role.BOT, response_text)
+            # 3. Retrieve relevant context blocks using RAG pipeline
+            rag_docs = await self.rag_pipeline.retrieve_context(user_input, top_k=3)
+            if rag_docs:
+                rag_context = "\n".join([doc.get("text", "") for doc in rag_docs])
+            else:
+                rag_context = "No knowledge base documents matching."
 
-        # 6. Save final session state (since add_message loads and updates, we set state specifically)
-        session = await self.session_manager.get_or_create_session(session_id)
-        if should_escalate:
-            session.state = SessionState.ESCALATED
-        else:
-            session.state = SessionState.AWAITING_INPUT
-        await self.session_manager.update_session(session)
+            # 4. Construct prompts templates utilizing the context builder
+            messages = self.context_builder.build_messages(session.history, rag_context)
 
-        # 7. Return response
-        return BotResponse(
-            text=response_text,
-            buttons=None,
-            should_escalate=should_escalate,
-        )
+            # 5. Agentic loop with tool resolution
+            llm_response = await self.llm_client.chat_completion(messages, tools=TOOL_DEFINITIONS)
+            finish_reason = llm_response.get("finish_reason", "stop")
+            llm_message = llm_response.get("message", {})
+
+            loop_limit = 5
+            loop_count = 0
+            did_initiate_refund = False
+            refund_amount = 0.0
+
+            while finish_reason == "tool_calls" and loop_count < loop_limit:
+                loop_count += 1
+                tool_calls = llm_message.get("tool_calls", [])
+                logger.info("LLM requested tool executions", tool_calls_count=len(tool_calls), session_id=session_id)
+
+                messages.append(llm_message)
+
+                for tc in tool_calls:
+                    tc_id = tc.get("id", "")
+                    func_details = tc.get("function", {})
+                    func_name = func_details.get("name", "")
+                    func_args_str = func_details.get("arguments", "{}")
+
+                    # Parse JSON arguments safely
+                    try:
+                        func_args = json.loads(func_args_str)
+                    except Exception:
+                        func_args = {}
+
+                    if func_name == "initiate_refund":
+                        did_initiate_refund = True
+                        try:
+                            refund_amount = float(func_args.get("amount", 0.0))
+                        except (ValueError, TypeError):
+                            refund_amount = 0.0
+
+                    try:
+                        tool_result = execute_tool(func_name, func_args)
+                    except Exception as e:
+                        logger.error("Tool execution failed", tool=func_name, error=str(e))
+                        tool_result = f"Error: Tool execution failed with error {e!s}"
+
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "name": func_name,
+                            "content": tool_result,
+                        }
+                    )
+
+                llm_response = await self.llm_client.chat_completion(messages, tools=TOOL_DEFINITIONS)
+                finish_reason = llm_response.get("finish_reason", "stop")
+                llm_message = llm_response.get("message", {})
+
+            final_text = llm_message.get("content") or ""
+
+            # 6. Evaluate Escalation policies
+            should_escalate = False
+            if "[ESCALATE]" in final_text or (did_initiate_refund and refund_amount > 500.0):
+                should_escalate = True
+                session.state = SessionState.ESCALATED
+                logger.info(
+                    "Session escalated to human handoff",
+                    session_id=session_id,
+                    refund_trigger=did_initiate_refund,
+                    refund_amount=refund_amount,
+                )
+                final_text = final_text.replace("[ESCALATE]", "").strip()
+            else:
+                session.state = SessionState.AWAITING_INPUT
+
+            # Persist bot reply and final state details
+            await self.session_manager.add_message(session_id, Role.BOT, final_text)
+
+            session = await self.session_manager.get_or_create_session(session_id)
+            session.state = SessionState.ESCALATED if should_escalate else SessionState.AWAITING_INPUT
+            await self.session_manager.update_session(session)
+
+            logger.info(
+                "Session state transition",
+                session_id=session_id,
+                from_state="PROCESSING",
+                to_state=session.state.name,
+            )
+
+            return BotResponse(
+                text=final_text,
+                buttons=None,
+                should_escalate=should_escalate,
+            )
+
+        except Exception as e:
+            logger.exception("An unhandled exception occurred in the Orchestrator loop", session_id=session_id, error=str(e))  # noqa: E501
+            # Graceful fallback response
+            fallback_text = (
+                "I'm having trouble connecting to my knowledge base. "
+                "Let me get a human representative to assist you."
+            )
+            return BotResponse(
+                text=fallback_text,
+                buttons=None,
+                should_escalate=True,
+            )
 
     async def handle_agent_reply(self, session_id: str, agent_message: str) -> BotResponse:
         """Process a reply sent by a human agent back to the user.

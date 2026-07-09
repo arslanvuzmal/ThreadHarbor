@@ -7,8 +7,9 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, 
 from fastapi.responses import PlainTextResponse
 
 from src.api.dependencies import get_app_settings
-from src.bot.models import BotResponse
 from src.bot.session import SessionManager
+from src.intelligence.llm_client import LLMClient
+from src.intelligence.rag import RAGPipeline
 from src.orchestrator.engine import Orchestrator
 from src.utils import pii_masker, whatsapp_formatter
 from src.utils.config import Settings
@@ -20,54 +21,63 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
-async def send_bot_reply(
-    session_id: str,
-    bot_response: BotResponse,
-    recipient_wa_id: str,
+async def process_and_reply_background(
+    sender_wa_id: str,
+    user_input: str,
     phone_number_id: str,
-    access_token: str,
-    redis_url: str,
+    settings: Settings,
 ) -> None:
-    """Asynchronously sends the formatted bot response back to WhatsApp using the Graph API.
+    """Performs the full agentic conversational loop and delivers the response asynchronously.
 
-    Performs 24-hour window check, formats message structure, and dispatches payload.
-
-    Args:
-        session_id: The ID of the session.
-        bot_response: The BotResponse instance returned by Orchestrator.
-        recipient_wa_id: The recipient's WhatsApp ID.
-        phone_number_id: The Phone Number ID extracted from payload.
-        access_token: Meta Developer Graph API Access Token.
-        redis_url: The Redis connection URL.
+    Runs in FastAPI BackgroundTasks to prevent Meta timeout issues.
     """
-    # Initialize connection to verify 24h window
-    redis_client = aioredis.from_url(redis_url, decode_responses=True)
+    redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
     try:
         session_manager = SessionManager(redis_client)
-        is_active_window = await session_manager.is_within_24h_window(session_id)
+        llm_client = LLMClient(
+            api_key=settings.OPENAI_API_KEY,
+            chat_model=settings.LLM_CHAT_MODEL,
+            embedding_model=settings.LLM_EMBEDDING_MODEL,
+        )
+        rag_pipeline = RAGPipeline(
+            llm_client=llm_client,
+            qdrant_url=settings.QDRANT_URL,
+            api_key=settings.QDRANT_API_KEY,
+        )
+        orchestrator = Orchestrator(
+            session_manager=session_manager,
+            llm_client=llm_client,
+            rag_pipeline=rag_pipeline,
+        )
+
+        # 1. Process conversational logic and agentic loop
+        bot_response = await orchestrator.process_message(sender_wa_id, user_input)
+
+        # 2. Check 24-hour interaction window policy
+        is_active_window = await session_manager.is_within_24h_window(sender_wa_id)
         if not is_active_window:
             logger.warning(
                 "User is outside the active 24-hour window. Cannot send free-form message.",
-                session_id=session_id,
-                recipient_wa_id=recipient_wa_id,
+                session_id=sender_wa_id,
             )
 
-        # Format message depending on payload content
+        # 3. Format message based on response content
         if bot_response.buttons:
             payload = whatsapp_formatter.format_interactive_buttons(
-                recipient_wa_id=recipient_wa_id,
+                recipient_wa_id=sender_wa_id,
                 text=bot_response.text,
                 buttons=bot_response.buttons,
             )
         else:
             payload = whatsapp_formatter.format_text_message(
-                recipient_wa_id=recipient_wa_id,
+                recipient_wa_id=sender_wa_id,
                 text=bot_response.text,
             )
 
+        # 4. Outbound Graph API post
         url = f"https://graph.facebook.com/v21.0/{phone_number_id}/messages"
         headers = {
-            "Authorization": f"Bearer {access_token}",
+            "Authorization": f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}",
             "Content-Type": "application/json",
         }
 
@@ -75,16 +85,16 @@ async def send_bot_reply(
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             logger.info(
-                "WhatsApp reply dispatched successfully",
+                "WhatsApp reply dispatched successfully in background",
                 phone_number_id=phone_number_id,
-                to=recipient_wa_id,
+                to=sender_wa_id,
                 status_code=response.status_code,
             )
+
     except Exception as e:
         logger.error(
-            "Failed to send WhatsApp bot reply",
-            session_id=session_id,
-            recipient_wa_id=recipient_wa_id,
+            "Failed processing and sending response in background task",
+            sender=sender_wa_id,
             error=str(e),
         )
     finally:
@@ -92,7 +102,6 @@ async def send_bot_reply(
             if hasattr(redis_client, "aclose") and callable(redis_client.aclose):
                 await redis_client.aclose()
             elif hasattr(redis_client, "close") and callable(redis_client.close):
-                # Avoid calling synchronous close with await in async environment
                 redis_client.close()
         except Exception:
             pass
@@ -138,10 +147,10 @@ async def receive_webhook(
     x_hub_signature_256: str | None = Header(None, alias="X-Hub-Signature-256"),
     settings: Settings = Depends(get_app_settings),  # noqa: B008
 ) -> dict[str, Any]:
-    """Meta Webhook POST endpoint to receive messages, routing them to the Orchestrator."""
+    """Meta Webhook POST endpoint to receive messages, routing them to the background task executor."""
     body_bytes = await request.body()
 
-    # Step 1: Verify the signature
+    # Step 1: Verify signature
     if not verify_signature(body_bytes, x_hub_signature_256, settings.WHATSAPP_APP_SECRET):
         logger.warning("Signature verification failed", signature=x_hub_signature_256)
         raise HTTPException(
@@ -179,7 +188,7 @@ async def receive_webhook(
             },
         ) from e
 
-    # Step 3: Extract the message/interactive content and process
+    # Step 3: Extract message values
     try:
         entry = payload.get("entry", [])
         if not entry:
@@ -215,7 +224,7 @@ async def receive_webhook(
 
         sender_wa_id = message.get("from")
 
-        # Step 4: Log the incoming message
+        # Step 4: Mask and log message body immediately
         masked_text = pii_masker.mask(text_content or "")
         logger.info(
             "Received WhatsApp message",
@@ -224,38 +233,18 @@ async def receive_webhook(
             body=masked_text,
         )
 
-        # Step 5 & 6: Process with the Orchestrator & Respond with placeholder in background
+        # Step 5: Queue full agentic process and response dispatch to BackgroundTasks
         if phone_number_id and sender_wa_id:
-            # Connect to Redis to initialize Orchestrator and SessionManager
-            redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
-            try:
-                session_manager = SessionManager(redis_client)
-                orchestrator = Orchestrator(session_manager)
-
-                # Process the message (modifies state machine)
-                bot_response = await orchestrator.process_message(sender_wa_id, text_content or "")
-
-                # Queue asynchronous reply delivery to keep Meta webhook fast
-                background_tasks.add_task(
-                    send_bot_reply,
-                    sender_wa_id,
-                    bot_response,
-                    sender_wa_id,
-                    phone_number_id,
-                    settings.WHATSAPP_ACCESS_TOKEN,
-                    settings.REDIS_URL,
-                )
-            finally:
-                try:
-                    if hasattr(redis_client, "aclose") and callable(redis_client.aclose):
-                        await redis_client.aclose()
-                    elif hasattr(redis_client, "close") and callable(redis_client.close):
-                        redis_client.close()
-                except Exception:
-                    pass
+            background_tasks.add_task(
+                process_and_reply_background,
+                sender_wa_id,
+                text_content or "",
+                phone_number_id,
+                settings,
+            )
 
     except Exception as e:
-        logger.error("Error processing webhook payload", error=str(e))
+        logger.error("Error parsing webhook payload structure", error=str(e))
         return {"status": "success"}
 
     return {"status": "success"}
