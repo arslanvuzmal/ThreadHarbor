@@ -15,6 +15,9 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.0",
     "aiosqlite>=0.20.0",
     "prometheus-fastapi-instrumentator>=7.0.0",
+    "openai>=1.50.0",
+    "qdrant-client>=1.11.0",
+    "tiktoken>=0.7.0",
 ]
 
 [project.optional-dependencies]
@@ -39,6 +42,11 @@ target-version = "py311"
 select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "ARG", "PTH", "RUF"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 ignore_missing_imports = true
+follow_imports = "silent"
+
+[[tool.mypy.overrides]]
+module = "numpy.*"
+ignore_errors = true
