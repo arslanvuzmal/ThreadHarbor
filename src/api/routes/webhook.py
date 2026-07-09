@@ -146,6 +146,7 @@ async def receive_webhook(
     background_tasks: BackgroundTasks,
     x_hub_signature_256: str | None = Header(None, alias="X-Hub-Signature-256"),
     settings: Settings = Depends(get_app_settings),  # noqa: B008
+    orchestrator: Orchestrator = Depends(get_orchestrator),  # noqa: B008
 ) -> dict[str, Any]:
     """Meta Webhook POST endpoint to receive messages, routing them to the background task executor."""
     body_bytes = await request.body()
@@ -233,6 +234,16 @@ async def receive_webhook(
             body=masked_text,
         )
 
+        # Step 5 & 6: Offload the Orchestrator call and message delivery to BackgroundTasks
+        if phone_number_id and sender_wa_id and text_content:
+            background_tasks.add_task(
+                process_incoming_message,
+                sender_wa_id,
+                phone_number_id,
+                text_content,
+                orchestrator,
+                settings.WHATSAPP_ACCESS_TOKEN,
+                background_tasks,
         # Step 5: Queue full agentic process and response dispatch to BackgroundTasks
         if phone_number_id and sender_wa_id:
             background_tasks.add_task(

@@ -11,6 +11,10 @@ dependencies = [
     "httpx>=0.27.0",
     "structlog>=24.4.0",
     "redis>=5.0.0",
+    "langfuse>=2.0.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "aiosqlite>=0.20.0",
+    "prometheus-fastapi-instrumentator>=7.0.0",
     "openai>=1.50.0",
     "qdrant-client>=1.11.0",
     "tiktoken>=0.7.0",
@@ -42,3 +46,8 @@ select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "ARG", "PTH", "RUF"]
 python_version = "3.12"
 strict = true
 ignore_missing_imports = true
+follow_imports = "silent"
+
+[[tool.mypy.overrides]]
+module = "numpy.*"
+ignore_errors = true
