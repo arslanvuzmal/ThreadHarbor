@@ -1,0 +1,98 @@
+from fastapi import FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from src.api.routes import webhook
+from src.utils.config import get_settings
+from src.utils.logger import configure_logger, get_logger
+
+# Load initial settings and configure logger
+settings = get_settings()
+configure_logger(settings.LOG_LEVEL)
+logger = get_logger(__name__)
+
+app = FastAPI(
+    title="WhatsApp Support Bot API",
+    version="0.1.0",
+    docs_url="/docs" if settings.LOG_LEVEL == "DEBUG" else None,
+    redoc_url="/redoc" if settings.LOG_LEVEL == "DEBUG" else None,
+)
+
+# CORS middleware (allow all for now)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include webhook router
+app.include_router(webhook.router)
+
+
+@app.get("/health")
+async def health_check() -> dict[str, str]:
+    """Health check endpoint.
+
+    Returns:
+        A dictionary containing the health status.
+    """
+    return {"status": "ok"}
+
+
+# Exception Handlers to return structured JSON errors as required:
+# {"error": {"code": 401, "message": "Invalid signature"}}
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    """Handle standard FastAPI/Starlette HTTP Exceptions."""
+    detail = exc.detail
+    # Check if detail is already a dictionary structured correctly
+    if isinstance(detail, dict) and "error" in detail:
+        error_payload = detail
+    else:
+        error_payload = {
+            "error": {
+                "code": exc.status_code,
+                "message": str(detail),
+            }
+        }
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=error_payload,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Handle standard Request Validation Errors."""
+    logger.warning("Validation error occurred", errors=exc.errors())
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "error": {
+                "code": status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "message": "Validation Error",
+                "details": exc.errors(),
+            }
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
+    """Handle all other unhandled exceptions."""
+    logger.exception("An unhandled exception occurred", error=str(exc))
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "error": {
+                "code": status.HTTP_500_INTERNAL_SERVER_ERROR,
+                "message": "Internal Server Error",
+            }
+        },
+    )
