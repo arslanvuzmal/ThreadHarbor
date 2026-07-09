@@ -30,6 +30,11 @@ dev = [
     "ruff>=0.6.0",
     "mypy>=1.11.0",
 ]
+dashboard = [
+    "streamlit>=1.38.0",
+    "pandas>=2.2.0",
+    "plotly>=5.24.0",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
