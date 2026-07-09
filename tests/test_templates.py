@@ -54,6 +54,9 @@ async def test_24h_window_expired_sends_template() -> None:
         from fastapi import BackgroundTasks
         bg = BackgroundTasks()
 
+        import httpx
+        http_client = httpx.AsyncClient()
+
         await process_incoming_message(
             sender_wa_id=sender_wa_id,
             phone_number_id=phone_number_id,
@@ -61,6 +64,7 @@ async def test_24h_window_expired_sends_template() -> None:
             orchestrator=orchestrator,
             access_token="test-token",
             background_tasks=bg,
+            http_client=http_client,
         )
 
         # Verify that the correct template payload was sent over HTTP

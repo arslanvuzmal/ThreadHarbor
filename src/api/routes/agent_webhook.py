@@ -3,7 +3,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
-from src.api.dependencies import get_app_settings, get_handoff_client
+from src.api.dependencies import get_app_settings, get_handoff_client, get_http_client
 from src.api.routes.webhook import send_whatsapp_reply
 from src.handoff.client import BaseHandoffClient
 from src.orchestrator.engine import Orchestrator
@@ -140,12 +140,14 @@ async def receive_agent_message(
         await orchestrator.save_session(session)
 
         # Queue the outgoing WhatsApp API message
+        http_client = await get_http_client()
         background_tasks.add_task(
             send_whatsapp_reply,
             phone_number_id,
             payload.session_id,
             formatted_reply,
             settings.WHATSAPP_ACCESS_TOKEN,
+            http_client,
         )
         logger.info("Queued agent reply dispatch to WhatsApp", session_id=payload.session_id)
 
@@ -171,12 +173,14 @@ async def receive_agent_message(
         await orchestrator.save_session(session)
 
         # Queue the CSAT closure message to WhatsApp
+        http_client = await get_http_client()
         background_tasks.add_task(
             send_whatsapp_reply,
             phone_number_id,
             payload.session_id,
             csat_text,
             settings.WHATSAPP_ACCESS_TOKEN,
+            http_client,
         )
         logger.info("Queued chat closure and CSAT template dispatch to WhatsApp", session_id=payload.session_id)
 
