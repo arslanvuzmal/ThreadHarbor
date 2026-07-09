@@ -1,15 +1,20 @@
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+import httpx
+import redis
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
+from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from src.analytics.db import init_db
+from src.analytics.db import async_engine, init_db
 from src.api.routes import agent_webhook, webhook
+from src.bot.session import SessionManager
+from src.intelligence.tracing import get_tracing_manager
 from src.utils.config import get_settings
 from src.utils.logger import configure_logger, get_logger
 
@@ -22,9 +27,32 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     """Lifespan handler for FastAPI application setup and teardown tasks."""
-    # Step 3: Create tables asynchronously on application startup
+    # Application startup tasks
     await init_db()
+
     yield
+
+    # Application shutdown tasks - Graceful Shutdown & Signal Handling
+    # Uvicorn by default registers signal handlers for SIGTERM and SIGINT,
+    # and will gracefully initiate the FastAPI lifespan shutdown events/lifespan teardown.
+    logger.info("Initiating graceful shutdown...")
+
+    # Close Redis connections
+    try:
+        SessionManager._store_instance.close()
+    except Exception as e:
+        logger.error("Failed to close Redis connection during shutdown", error=str(e))
+
+    # Flush Langfuse traces
+    try:
+        manager = get_tracing_manager()
+        if manager.enabled and manager.langfuse:
+            manager.langfuse.flush()
+            logger.info("Flushed Langfuse traces gracefully")
+    except Exception as e:
+        logger.error("Failed to flush Langfuse traces on shutdown", error=str(e))
+
+    logger.info("Graceful shutdown completed successfully")
 
 
 app = FastAPI(
@@ -60,6 +88,60 @@ async def health_check() -> dict[str, str]:
         A dictionary containing the health status.
     """
     return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready_check() -> JSONResponse:
+    """Ready check endpoint checking Redis, Qdrant and Database.
+
+    Returns:
+        JSONResponse with the status of each component and 200 or 503 status code.
+    """
+    redis_ok = False
+    qdrant_ok = False
+    db_ok = False
+
+    # Check Redis
+    try:
+        r = redis.Redis.from_url(settings.REDIS_URL, socket_timeout=1.0)
+        r.ping()
+        redis_ok = True
+    except Exception as e:
+        logger.error("Ready check: Redis is down", error=str(e))
+
+    # Check Qdrant
+    try:
+        # Send a lightweight HTTP check to Qdrant health endpoint
+        response = httpx.get(f"{settings.QDRANT_URL}/healthz", timeout=1.0)
+        if response.status_code == 200:
+            qdrant_ok = True
+        else:
+            # Try general qdrant root as fallback
+            response_root = httpx.get(f"{settings.QDRANT_URL}/", timeout=1.0)
+            if response_root.status_code == 200:
+                qdrant_ok = True
+    except Exception as e:
+        logger.error("Ready check: Qdrant is down", error=str(e))
+
+    # Check Database
+    try:
+        async with async_engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception as e:
+        logger.error("Ready check: Database is down", error=str(e))
+
+    status_code = status.HTTP_200_OK if (redis_ok and qdrant_ok and db_ok) else status.HTTP_503_SERVICE_UNAVAILABLE
+
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": "ok" if status_code == 200 else "error",
+            "redis": "ok" if redis_ok else "down",
+            "qdrant": "ok" if qdrant_ok else "down",
+            "database": "ok" if db_ok else "down"
+        }
+    )
 
 
 # Exception Handlers to return structured JSON errors as required:
