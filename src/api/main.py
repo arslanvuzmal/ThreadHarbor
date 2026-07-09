@@ -1,10 +1,15 @@
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from src.api.routes import webhook
+from src.analytics.db import init_db
+from src.api.routes import agent_webhook, webhook
 from src.utils.config import get_settings
 from src.utils.logger import configure_logger, get_logger
 
@@ -13,12 +18,25 @@ settings = get_settings()
 configure_logger(settings.LOG_LEVEL)
 logger = get_logger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
+    """Lifespan handler for FastAPI application setup and teardown tasks."""
+    # Step 3: Create tables asynchronously on application startup
+    await init_db()
+    yield
+
+
 app = FastAPI(
     title="WhatsApp Support Bot API",
     version="0.1.0",
     docs_url="/docs" if settings.LOG_LEVEL == "DEBUG" else None,
     redoc_url="/redoc" if settings.LOG_LEVEL == "DEBUG" else None,
+    lifespan=lifespan,
 )
+
+# Step 5: Expose Prometheus HTTP Metrics
+Instrumentator().instrument(app).expose(app)
 
 # CORS middleware (allow all for now)
 app.add_middleware(
@@ -31,6 +49,7 @@ app.add_middleware(
 
 # Include webhook router
 app.include_router(webhook.router)
+app.include_router(agent_webhook.router)
 
 
 @app.get("/health")

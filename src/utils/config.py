@@ -9,6 +9,11 @@ class Settings(BaseSettings):
     WHATSAPP_ACCESS_TOKEN: str
     REDIS_URL: str = "redis://localhost:6379/0"
     LOG_LEVEL: str = "INFO"
+    AGENT_API_SECRET: str = "default_agent_secret"
+    HANDOFF_PROVIDER: str = "mock"
+    LANGFUSE_PUBLIC_KEY: str | None = None
+    LANGFUSE_SECRET_KEY: str | None = None
+    LANGFUSE_HOST: str = "https://cloud.langfuse.com"
 
     model_config = SettingsConfigDict(
         env_file=".env",

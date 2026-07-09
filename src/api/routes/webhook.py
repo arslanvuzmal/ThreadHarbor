@@ -5,7 +5,9 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from src.api.dependencies import get_app_settings
+from src.api.dependencies import get_app_settings, get_handoff_client
+from src.handoff.client import BaseHandoffClient
+from src.orchestrator.engine import Orchestrator
 from src.utils import pii_masker
 from src.utils.config import Settings
 from src.utils.logger import get_logger
@@ -14,6 +16,61 @@ from src.utils.whatsapp_signature import verify_signature
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+def get_orchestrator(
+    handoff_client: BaseHandoffClient = Depends(get_handoff_client),  # noqa: B008
+) -> Orchestrator:
+    """Dependency to provide the shared Orchestrator instance.
+
+    Args:
+        handoff_client: BaseHandoffClient instance.
+
+    Returns:
+        Orchestrator instance.
+    """
+    return Orchestrator(handoff_client=handoff_client)
+
+
+async def process_incoming_message(
+    sender_wa_id: str,
+    phone_number_id: str,
+    text_content: str,
+    orchestrator: Orchestrator,
+    access_token: str,
+    background_tasks: BackgroundTasks,
+) -> None:
+    """Background task to handle user messages through the Orchestrator.
+
+    Avoids blocking the HTTP response thread.
+
+    Args:
+        sender_wa_id: The WhatsApp ID of the sender.
+        phone_number_id: The phone number ID from Meta's webhook.
+        text_content: Message text.
+        orchestrator: The Orchestrator engine.
+        access_token: WhatsApp Access Token.
+        background_tasks: FastAPI BackgroundTasks runner.
+    """
+    try:
+        # Load and update session with correct phone_number_id
+        session = await orchestrator.get_or_create_session(sender_wa_id)
+        session.phone_number_id = phone_number_id
+        await orchestrator.save_session(session)
+
+        # Handle message in orchestrator
+        bot_response = await orchestrator.handle_message(sender_wa_id, text_content, background_tasks)
+
+        # If there is response text, send it back via Meta API
+        if bot_response.text:
+            await send_whatsapp_reply(
+                phone_number_id=phone_number_id,
+                to=sender_wa_id,
+                text_body=bot_response.text,
+                access_token=access_token,
+            )
+    except Exception as e:
+        logger.exception("Error processing incoming message in background", error=str(e))
 
 
 async def send_whatsapp_reply(
@@ -111,6 +168,7 @@ async def receive_webhook(
     background_tasks: BackgroundTasks,
     x_hub_signature_256: str | None = Header(None, alias="X-Hub-Signature-256"),
     settings: Settings = Depends(get_app_settings),  # noqa: B008
+    orchestrator: Orchestrator = Depends(get_orchestrator),  # noqa: B008
 ) -> dict[str, Any]:
     """Meta Webhook GET endpoint to receive messages.
 
@@ -215,15 +273,16 @@ async def receive_webhook(
             body=masked_text,
         )
 
-        # Step 5 & 6: Respond with placeholder in background to avoid blocking Meta
-        if phone_number_id and sender_wa_id:
-            reply_text = "Thank you for reaching out. Our bot is being set up. A human will assist you shortly."
+        # Step 5 & 6: Offload the Orchestrator call and message delivery to BackgroundTasks
+        if phone_number_id and sender_wa_id and text_content:
             background_tasks.add_task(
-                send_whatsapp_reply,
-                phone_number_id,
+                process_incoming_message,
                 sender_wa_id,
-                reply_text,
+                phone_number_id,
+                text_content,
+                orchestrator,
                 settings.WHATSAPP_ACCESS_TOKEN,
+                background_tasks,
             )
 
     except Exception as e:
