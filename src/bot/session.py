@@ -1,83 +1,146 @@
 import json
-from datetime import UTC, datetime
+import time
+from typing import Any, ClassVar
 
-from redis.asyncio import Redis
+import redis
+from pydantic import BaseModel, Field
 
-from src.bot.models import Message, Role, SessionData, SessionState
+from src.utils.config import get_settings
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-class SessionManager:
-    """Manages user sessions asynchronously using Redis, handling data persistence and TTL."""
+class BotResponse(BaseModel):
+    """Encapsulates the text response returned by the Orchestrator."""
 
-    def __init__(self, redis_client: Redis, ttl_seconds: int = 172800) -> None:
-        """Initialize SessionManager with redis client and ttl (default 48h)."""
-        self.redis = redis_client
-        self.ttl = ttl_seconds
+    text: str = ""
+
+
+class SessionData(BaseModel):
+    """Data model representing the state and metadata of a user's WhatsApp conversation session."""
+
+    session_id: str
+    state: str = "AWAITING_INPUT"  # IDLE, AWAITING_INPUT, PROCESSING, ESCALATED, HUMAN_HANDOFF
+    user_profile: dict[str, Any] = Field(
+        default_factory=lambda: {"name": "Customer", "phone": "", "tier": "standard"}
+    )
+    transcript: list[dict[str, Any]] = Field(default_factory=list)
+
+    # Escalation and tracking attributes
+    low_confidence_consecutive_count: int = 0
+    last_user_message: str | None = None
+    ticket_id: str | None = None
+    phone_number_id: str | None = None
+
+    # Interaction window tracking (Meta's 24-hour compliance rule)
+    last_interaction_timestamp: float = Field(default_factory=time.time)
+
+
+class RedisSessionStore:
+    """Manages storage and retrieval of SessionData using Redis with a 48-hour TTL.
+
+    Falls back to a standard in-memory dictionary if Redis connection is unavailable.
+    """
+    _fallback_store: ClassVar[dict[str, str]] = {}
+
+    def __init__(self) -> None:
+        """Initializes the RedisSessionStore and attempts a connection to Redis."""
+        self.settings = get_settings()
+        self._redis: redis.Redis | None = None
+
+        try:
+            # Type ignore is used because from_url accepts any keyword and we want strict type checking
+            self._redis = redis.Redis.from_url(
+                self.settings.REDIS_URL,
+                decode_responses=True,
+            )
+            # Ping to verify the connection works
+            self._redis.ping()
+            logger.info("Successfully connected to Redis session store")
+        except Exception as e:
+            logger.warning(
+                "Redis session store is unavailable; using in-memory fallback",
+                error=str(e),
+            )
+            self._redis = None
 
     def _get_key(self, session_id: str) -> str:
-        """Generate prefix-based Redis key to avoid collisions."""
+        """Constructs the Redis key for a given session ID.
+
+        Args:
+            session_id: Unique identifier for the user session.
+
+        Returns:
+            The prefixed key string.
+        """
         return f"wbot:session:{session_id}"
 
-    async def get_or_create_session(self, session_id: str) -> SessionData:
-        """Fetches the session from Redis. If it doesn't exist, creates and saves a new one."""
+    def get_session(self, session_id: str) -> str | None:
+        """Retrieves raw session string from Redis or in-memory fallback.
+
+        Args:
+            session_id: Unique identifier for the user session.
+
+        Returns:
+            The serialized session JSON string, or None if not found.
+        """
         key = self._get_key(session_id)
-        data = await self.redis.get(key)
-        if data:
+        if self._redis:
             try:
-                raw_dict = json.loads(data)
-                return SessionData.model_validate(raw_dict)
+                res = self._redis.get(key)
+                if isinstance(res, bytes):
+                    return res.decode("utf-8")
+                return res
             except Exception as e:
-                logger.error("Failed to parse session data from Redis", session_id=session_id, error=str(e))
+                logger.error("Failed to get session from Redis, checking fallback", error=str(e))
 
-        # Create new session if not found or malformed
-        logger.info("Creating new session in Redis", session_id=session_id)
-        new_session = SessionData(
-            session_id=session_id,
-            state=SessionState.IDLE,
-            history=[],
-            last_interaction_time=datetime.now(UTC),
-            metadata={},
-        )
-        await self.update_session(new_session)
-        return new_session
+        return self._fallback_store.get(key)
 
-    async def update_session(self, session_data: SessionData) -> None:
-        """Saves the session state back to Redis and sets the TTL."""
-        key = self._get_key(session_data.session_id)
-        # Convert model to json using Pydantic's serialization
-        serialized_data = session_data.model_dump_json()
-        await self.redis.set(key, serialized_data, ex=self.ttl)
-        logger.debug("Updated session in Redis", session_id=session_data.session_id, state=session_data.state)
+    def save_session(self, session_id: str, data_str: str, ttl_seconds: int = 172800) -> None:
+        """Saves a session's serialized data with a 48-hour TTL.
 
-    async def add_message(self, session_id: str, role: Role, content: str) -> None:
-        """Appends a message to session history, updates last interaction time, and persists it."""
-        session = await self.get_or_create_session(session_id)
-        new_message = Message(role=role, content=content, timestamp=datetime.now(UTC))
-        session.history.append(new_message)
-        session.last_interaction_time = datetime.now(UTC)
-        await self.update_session(session)
+        Args:
+            session_id: Unique identifier for the user session.
+            data_str: Serialized JSON string of SessionData.
+            ttl_seconds: TTL for the session key in seconds (defaults to 172800 / 48 hours).
+        """
+        key = self._get_key(session_id)
+        if self._redis:
+            try:
+                self._redis.setex(key, ttl_seconds, data_str)
+                return
+            except Exception as e:
+                logger.error("Failed to save session to Redis, writing to fallback", error=str(e))
 
-    async def is_within_24h_window(self, session_id: str) -> bool:
-        """Checks if the user's last interaction was within the 24-hour window."""
-        session = await self.get_or_create_session(session_id)
-        # Find the last message sent by the USER (free-form messages are restricted within 24h of user's last message)
-        last_user_time: datetime | None = None
-        for msg in reversed(session.history):
-            if msg.role == Role.USER:
-                last_user_time = msg.timestamp
-                break
+        self._fallback_store[key] = data_str
 
-        # If user has never spoken, treat as outside window or use session creation time as fallback
-        if not last_user_time:
-            last_user_time = session.last_interaction_time
 
-        # Ensure timezone-aware comparison
-        if last_user_time.tzinfo is None:
-            last_user_time = last_user_time.replace(tzinfo=UTC)
+class SessionManager:
+    """Provides high-level session check and lifecycle utilities."""
 
-        current_time = datetime.now(UTC)
-        difference = current_time - last_user_time
-        return difference.total_seconds() <= 86400
+    _store_instance = RedisSessionStore()
+
+    @classmethod
+    def is_within_24h_window(cls, session_id: str) -> bool:
+        """Checks whether the session is inside the 24-hour active interaction window.
+
+        Args:
+            session_id: The session ID of the user.
+
+        Returns:
+            bool: True if within the 24-hour window, otherwise False.
+        """
+        raw_session = cls._store_instance.get_session(session_id)
+        if not raw_session:
+            return True
+
+        try:
+            data = json.loads(raw_session)
+            last_timestamp = data.get("last_interaction_timestamp")
+            if last_timestamp is None:
+                return True
+            return (time.time() - float(last_timestamp)) < 86400
+        except Exception as e:
+            logger.error("Failed to evaluate 24h window, default to True", error=str(e))
+            return True

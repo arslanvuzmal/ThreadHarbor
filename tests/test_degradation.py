@@ -1,4 +1,5 @@
 import asyncio
+
 import pytest
 from sqlalchemy import select
 
@@ -10,7 +11,7 @@ from src.orchestrator.engine import Orchestrator
 
 @pytest.mark.asyncio
 async def test_orchestrator_graceful_degradation() -> None:
-    """Tests that any processing exception triggers FallbackEngine gracefully without crashing and records used_fallback in DB."""
+    """Tests that processing exceptions trigger FallbackEngine gracefully and save metrics."""
     # Ensure database is initialized
     await init_db()
 

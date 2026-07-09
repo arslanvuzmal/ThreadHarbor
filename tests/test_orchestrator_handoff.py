@@ -1,6 +1,5 @@
 import pytest
 
-from src.bot.session import SessionData
 from src.handoff.client import MockZendeskClient
 from src.orchestrator.engine import Orchestrator
 

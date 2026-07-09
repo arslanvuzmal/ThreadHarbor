@@ -1,4 +1,3 @@
-import pytest
 
 from src.bot.session import SessionData
 from src.orchestrator.triggers import EscalationTriggerEngine, SentimentAnalyzer
@@ -10,7 +9,12 @@ def test_explicit_intent_trigger() -> None:
     session = SessionData(session_id="12345")
 
     # Explicit phrases
-    phrases = ["please connect me to an agent", "human representative", "talk to someone please", "I want to speak with a human"]
+    phrases = [
+        "please connect me to an agent",
+        "human representative",
+        "talk to someone please",
+        "I want to speak with a human",
+    ]
     for phrase in phrases:
         triggered, reason = engine.evaluate_pre_llm(phrase, session)
         assert triggered is True
