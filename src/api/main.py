@@ -56,8 +56,8 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(
-    title="WhatsApp Support Bot API",
-    version="0.1.0",
+    title="OmniRouter API",
+    version="1.0.0",
     docs_url="/docs" if settings.LOG_LEVEL == "DEBUG" else None,
     redoc_url="/redoc" if settings.LOG_LEVEL == "DEBUG" else None,
     lifespan=lifespan,

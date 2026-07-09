@@ -1,8 +1,8 @@
 <div align="center">
-  <img src="https://img.shields.io/badge/Bot-WhatsApp-25D366?style=for-the-badge&logo=whatsapp&logoColor=white" alt="WhatsApp Support Bot" />
-  <h1>WhatsApp Intelligent Support Bot</h1>
+  <img src="https://img.shields.io/badge/OmniRouter-25D366?style=for-the-badge&logo=whatsapp&logoColor=white" alt="OmniRouter Support Bot" />
+  <h1>OmniRouter</h1>
   <p>
-    <b>Highly Scalable, Context-Aware, Human-in-the-Loop Customer Support Engine</b>
+    <b>Highly Scalable, Context-Aware, Human-in-the-Loop WhatsApp Orchestrator</b>
   </p>
   
   [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg?style=flat-square&logo=python&logoColor=white)](https://python.org)
@@ -17,7 +17,7 @@
 
 ## 🌟 Executive Summary
 
-Customer support scaling on WhatsApp can quickly become unmanageable without robust automation. **WhatsApp Support Bot** is an enterprise-grade scaffolding that intelligently triages user requests, utilizes LLM-driven knowledge retrieval (RAG), and seamlessly hands off unresolvable queries to human agents.
+Customer support scaling on WhatsApp can quickly become unmanageable without robust automation. **OmniRouter** is an enterprise-grade scaffolding that intelligently triages user requests, utilizes LLM-driven knowledge retrieval (RAG), and seamlessly hands off unresolvable queries to human agents.
 
 It is built with a strictly asynchronous architecture to handle high throughput with minimal resource overhead, ensuring sub-second latencies and strict data privacy.
 
@@ -65,7 +65,7 @@ graph TD
 The codebase adheres strictly to Domain-Driven Design (DDD), ensuring modular isolation:
 
 ```text
-whatsapp-support-bot/
+whatsapp-orchestrator/
 ├── pyproject.toml         # Python Dependencies (uv/pip)
 ├── Dockerfile             # Container definition for the API
 ├── docker-compose.yml     # Local multi-service orchestration
@@ -95,8 +95,8 @@ whatsapp-support-bot/
 
 Clone the repository and install dependencies:
 ```bash
-git clone https://github.com/avuzmal/whatsapp-support-bot.git
-cd whatsapp-support-bot
+git clone https://github.com/avuzmal/whatsapp-orchestrator.git
+cd whatsapp-orchestrator
 pip install -e .[dev]
 ```
 
@@ -153,7 +153,7 @@ Highlights include:
 ## 🛣️ Roadmap
 
 - [x] **Phase 1**: Webhook scaffolding, robust core architecture, and fundamental pipelines.
-- [ ] **Phase 2**: Full RAG pipeline deployment and advanced LLM chain reasoning (Pending).
-- [ ] **Phase 3**: Custom Dashboard integrations and comprehensive analytics UI (Upcoming).
+- [x] **Phase 2**: Full RAG pipeline deployment and advanced LLM chain reasoning.
+- [x] **Phase 3**: Custom Dashboard integrations and comprehensive analytics UI.
 
-> *Note: This project is maintained independently. All future phase development is managed directly by the principal author.*
+> *Note: This project is maintained independently. All phases are fully complete.*

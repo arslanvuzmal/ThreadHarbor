@@ -1,7 +1,7 @@
 [project]
-name = "whatsapp-support-bot"
-version = "0.1.0"
-description = "Phase 01 WhatsApp webhook scaffolding and support bot foundation"
+name = "whatsapp-orchestrator"
+version = "1.0.0"
+description = "OmniRouter: Highly Scalable WhatsApp Orchestrator and Support Engine"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
