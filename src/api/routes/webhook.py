@@ -1,11 +1,13 @@
 import json
+import time
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from src.api.dependencies import get_app_settings, get_handoff_client
+from src.api.dependencies import get_app_settings, get_handoff_client, get_http_client
+from src.bot.session import SessionManager
 from src.handoff.client import BaseHandoffClient
 from src.orchestrator.engine import Orchestrator
 from src.utils import pii_masker
@@ -16,6 +18,43 @@ from src.utils.whatsapp_signature import verify_signature
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+async def check_message_idempotency(message_id: str) -> bool:
+    """Check if a message has already been processed using Redis-based deduplication.
+
+    Args:
+        message_id: The unique WhatsApp message ID.
+
+    Returns:
+        True if the message was already processed, False if it's new.
+    """
+    store = SessionManager._store_instance
+    key = f"wbot:processed_msg:{message_id}"
+    
+    if store._redis:
+        try:
+            # Try to set the key with a 1-hour TTL (atomic operation)
+            # Returns True if key was set (new message), False if key already exists
+            result = store._redis.set(key, "1", nx=True, ex=3600)
+            return result is False  # If result is False, key already existed
+        except Exception as e:
+            logger.warning("Redis idempotency check failed, proceeding without dedup", error=str(e))
+            return False
+    
+    # Fallback to in-memory store (not ideal for multi-instance deployments)
+    if hasattr(store, "_processed_messages"):
+        if message_id in store._processed_messages:
+            return True
+        store._processed_messages[message_id] = time.time()
+        # Clean up old entries (older than 1 hour)
+        cutoff = time.time() - 3600
+        store._processed_messages = {
+            k: v for k, v in store._processed_messages.items() if v > cutoff
+        }
+        return False
+    
+    return False
 
 
 def get_orchestrator(
@@ -39,6 +78,7 @@ async def process_incoming_message(
     orchestrator: Orchestrator,
     access_token: str,
     background_tasks: BackgroundTasks,
+    http_client: httpx.AsyncClient,
     media_id: str | None = None,
     media_mime_type: str | None = None,
 ) -> None:
@@ -53,6 +93,7 @@ async def process_incoming_message(
         orchestrator: The Orchestrator engine.
         access_token: WhatsApp Access Token.
         background_tasks: FastAPI BackgroundTasks runner.
+        http_client: Shared async HTTP client with connection pooling.
         media_id: Optional ID of any uploaded media attachment.
         media_mime_type: Optional mime type of the media attachment.
     """
@@ -112,6 +153,7 @@ async def process_incoming_message(
                     to=sender_wa_id,
                     text_body=bot_response.text,
                     access_token=access_token,
+                    http_client=http_client,
                 )
     except Exception as e:
         logger.exception("Error processing incoming message in background", error=str(e))
@@ -122,6 +164,7 @@ async def send_whatsapp_reply(
     to: str,
     text_body: str,
     access_token: str,
+    http_client: httpx.AsyncClient,
 ) -> None:
     """Asynchronously sends a reply back to WhatsApp using the Graph API.
 
@@ -130,6 +173,7 @@ async def send_whatsapp_reply(
         to: The sender's WhatsApp ID (wa_id).
         text_body: The reply text to send.
         access_token: The WHATSAPP_ACCESS_TOKEN configuration.
+        http_client: Shared async HTTP client with connection pooling.
     """
     url = f"https://graph.facebook.com/v21.0/{phone_number_id}/messages"
     headers = {
@@ -145,15 +189,14 @@ async def send_whatsapp_reply(
     }
 
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, headers=headers)
-            response.raise_for_status()
-            logger.info(
-                "WhatsApp reply sent successfully",
-                phone_number_id=phone_number_id,
-                to=to,
-                status_code=response.status_code,
-            )
+        response = await http_client.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        logger.info(
+            "WhatsApp reply sent successfully",
+            phone_number_id=phone_number_id,
+            to=to,
+            status_code=response.status_code,
+        )
     except Exception as e:
         logger.error(
             "Failed to send WhatsApp reply",
@@ -288,6 +331,15 @@ async def receive_webhook(
             return {"status": "success"}
 
         message = messages[0]
+        message_id = message.get("id")  # Extract WhatsApp message ID for idempotency
+        
+        # Idempotency check: skip if this message was already processed
+        if message_id:
+            is_duplicate = await check_message_idempotency(message_id)
+            if is_duplicate:
+                logger.info("Duplicate message detected, skipping processing", message_id=message_id)
+                return {"status": "success"}
+        
         msg_type = message.get("type")
 
         text_content = None
@@ -335,6 +387,8 @@ async def receive_webhook(
 
         # Step 5 & 6: Offload the Orchestrator call and message delivery to BackgroundTasks
         if phone_number_id and sender_wa_id and text_content:
+            # Get shared HTTP client for connection pooling
+            http_client = await get_http_client()
             background_tasks.add_task(
                 process_incoming_message,
                 sender_wa_id,
@@ -343,6 +397,7 @@ async def receive_webhook(
                 orchestrator,
                 settings.WHATSAPP_ACCESS_TOKEN,
                 background_tasks,
+                http_client,
                 media_id,
                 media_mime_type,
             )
