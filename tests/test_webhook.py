@@ -1,7 +1,10 @@
 import json
 from typing import Any
+from unittest.mock import AsyncMock
 
+import pytest
 import respx
+from fakeredis.aioredis import FakeRedis
 from fastapi.testclient import TestClient
 from httpx import Response
 
@@ -47,12 +50,14 @@ def test_get_webhook_missing_params(client: TestClient) -> None:
     assert response.status_code == 403
 
 
+@pytest.mark.asyncio
 @respx.mock
-def test_post_webhook_valid_text_message(
+async def test_post_webhook_valid_text_message(
     client: TestClient,
     signature_generator: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test POST /webhook with valid signature and text message returns 200."""
+    """Test POST /webhook immediately returns 200 and triggers background tasks."""
     payload = {
         "object": "whatsapp_business_account",
         "entry": [
@@ -89,23 +94,55 @@ def test_post_webhook_valid_text_message(
     body_bytes = json.dumps(payload).encode("utf-8")
     signature = signature_generator(body_bytes)
 
-    # Mock the external WhatsApp graph API call
-    # POST https://graph.facebook.com/v21.0/{phone_number_id}/messages
+    # Mock outbound Graph API call
     route = respx.post("https://graph.facebook.com/v21.0/1234567890/messages").mock(
         return_value=Response(200, json={"message_id": "wamid.mocked"})
     )
 
-    response = client.post(
-        "/webhook",
-        content=body_bytes,
-        headers={"X-Hub-Signature-256": signature, "Content-Type": "application/json"},
-    )
+    # Mock LLM and RAG Pipeline
+    import src.intelligence.llm_client
+    import src.intelligence.rag
 
-    assert response.status_code == 200
-    assert response.json() == {"status": "success"}
+    mock_llm_call = AsyncMock(return_value={
+        "finish_reason": "stop",
+        "message": {
+            "role": "assistant",
+            "content": "Mock text response from chatbot AI.",
+        }
+    })
+    monkeypatch.setattr(src.intelligence.llm_client.LLMClient, "chat_completion", mock_llm_call)
 
-    # Assert that the route was called
-    assert route.called
+    # Mock RAG retrieve_context
+    mock_rag_call = AsyncMock(return_value=[{"text": "mock context chunk"}])
+    monkeypatch.setattr(src.intelligence.rag.RAGPipeline, "retrieve_context", mock_rag_call)
+
+    # Use FakeRedis to back our route handler
+    import redis.asyncio as aioredis
+    original_from_url = aioredis.from_url
+    fake_redis = FakeRedis(decode_responses=True)
+
+    def mock_from_url(*_args: Any, **_kwargs: Any) -> Any:
+        return fake_redis
+
+    aioredis.from_url = mock_from_url
+
+    try:
+        response = client.post(
+            "/webhook",
+            content=body_bytes,
+            headers={"X-Hub-Signature-256": signature, "Content-Type": "application/json"},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"status": "success"}
+
+        # Verify that background tasks executed successfully with the mocked endpoints
+        assert mock_llm_call.called
+        assert mock_rag_call.called
+        assert route.called
+    finally:
+        aioredis.from_url = original_from_url
+        await fake_redis.aclose()
 
 
 def test_post_webhook_invalid_signature(client: TestClient) -> None:
@@ -152,7 +189,7 @@ def test_post_webhook_status_update(
     client: TestClient,
     signature_generator: Any,
 ) -> None:
-    """Test POST /webhook with status update (no messages) returns 200 and does not crash."""
+    """Test POST /webhook with status update (no message) returns 200 and does not crash."""
     payload = {
         "object": "whatsapp_business_account",
         "entry": [
@@ -195,12 +232,14 @@ def test_post_webhook_status_update(
     assert response.json() == {"status": "success"}
 
 
+@pytest.mark.asyncio
 @respx.mock
-def test_post_webhook_interactive_message(
+async def test_post_webhook_interactive_message(
     client: TestClient,
     signature_generator: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test POST /webhook with valid interactive message returns 200 and logs successfully."""
+    """Test POST /webhook with valid interactive message returns 200."""
     payload = {
         "object": "whatsapp_business_account",
         "entry": [
@@ -237,17 +276,49 @@ def test_post_webhook_interactive_message(
     body_bytes = json.dumps(payload).encode("utf-8")
     signature = signature_generator(body_bytes)
 
-    # Mock the external WhatsApp graph API call
+    # Mock outbound Graph API call
     route = respx.post("https://graph.facebook.com/v21.0/1234567890/messages").mock(
         return_value=Response(200, json={"message_id": "wamid.mocked"})
     )
 
-    response = client.post(
-        "/webhook",
-        content=body_bytes,
-        headers={"X-Hub-Signature-256": signature, "Content-Type": "application/json"},
-    )
+    # Mock LLM and RAG Pipeline
+    import src.intelligence.llm_client
+    import src.intelligence.rag
 
-    assert response.status_code == 200
-    assert response.json() == {"status": "success"}
-    assert route.called
+    mock_llm_call = AsyncMock(return_value={
+        "finish_reason": "stop",
+        "message": {
+            "role": "assistant",
+            "content": "Interactive selected item response details.",
+        }
+    })
+    monkeypatch.setattr(src.intelligence.llm_client.LLMClient, "chat_completion", mock_llm_call)
+
+    mock_rag_call = AsyncMock(return_value=[])
+    monkeypatch.setattr(src.intelligence.rag.RAGPipeline, "retrieve_context", mock_rag_call)
+
+    import redis.asyncio as aioredis
+    original_from_url = aioredis.from_url
+    fake_redis = FakeRedis(decode_responses=True)
+
+    def mock_from_url(*_args: Any, **_kwargs: Any) -> Any:
+        return fake_redis
+
+    aioredis.from_url = mock_from_url
+
+    try:
+        response = client.post(
+            "/webhook",
+            content=body_bytes,
+            headers={"X-Hub-Signature-256": signature, "Content-Type": "application/json"},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"status": "success"}
+
+        assert mock_llm_call.called
+        assert mock_rag_call.called
+        assert route.called
+    finally:
+        aioredis.from_url = original_from_url
+        await fake_redis.aclose()

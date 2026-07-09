@@ -1,7 +1,7 @@
 [project]
 name = "whatsapp-support-bot"
 version = "0.1.0"
-description = "Phase 01 WhatsApp webhook scaffolding and support bot foundation"
+description = "Phase 03 WhatsApp support bot intelligence layer and RAG pipeline"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -28,6 +28,7 @@ dev = [
     "respx>=0.21.0",
     "ruff>=0.6.0",
     "mypy>=1.11.0",
+    "fakeredis>=2.26.0",
 ]
 
 [tool.pytest.ini_options]
@@ -36,7 +37,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "ARG", "PTH", "RUF"]
