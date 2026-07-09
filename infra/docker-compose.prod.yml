@@ -1,0 +1,87 @@
+version: '3.8'
+
+services:
+  app:
+    image: ghcr.io/yourusername/whatsapp-support-bot:latest
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1g
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env.prod
+    networks:
+      - prod_network
+    depends_on:
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+
+  redis:
+    image: redis:alpine
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512m
+    ports:
+      - "6379:6379"
+    networks:
+      - prod_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2g
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_prod_data:/qdrant/storage
+    networks:
+      - prod_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  postgres:
+    image: postgres:alpine
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1g
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_password
+      POSTGRES_DB: analytics
+    volumes:
+      - pg_prod_data:/var/lib/postgresql/data
+    networks:
+      - prod_network
+
+networks:
+  prod_network:
+    external: true
+
+volumes:
+  qdrant_prod_data:
+  pg_prod_data:

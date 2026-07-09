@@ -115,6 +115,15 @@ class RedisSessionStore:
 
         self._fallback_store[key] = data_str
 
+    def close(self) -> None:
+        """Closes the Redis connection gracefully."""
+        if self._redis:
+            try:
+                self._redis.close()
+                logger.info("Closed Redis connection gracefully")
+            except Exception as e:
+                logger.error("Error closing Redis connection during shutdown", error=str(e))
+
 
 class SessionManager:
     """Provides high-level session check and lifecycle utilities."""
