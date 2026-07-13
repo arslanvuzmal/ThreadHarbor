@@ -1,9 +1,8 @@
 import sqlite3
+
 import pandas as pd
-import streamlit as st
 import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime, timedelta
+import streamlit as st
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -74,7 +73,10 @@ st.markdown("""
 
 # --- Header ---
 st.title("OmniRouter Intelligence Command Center")
-st.markdown("<p style='color: #888; font-size: 16px; margin-top: -15px;'>Real-time performance telemetry and automated routing analytics</p>", unsafe_allow_html=True)
+st.markdown(
+    "<p style='font-size: 16px; color: #888;'>Real-time performance telemetry and automated routing analytics</p>",
+    unsafe_allow_html=True,
+)
 
 # --- Sidebar & Data Loading ---
 with st.sidebar:
@@ -93,8 +95,8 @@ with st.sidebar:
 # Dynamic TTL based on toggle
 ttl_val = 5 if auto_refresh else 3600
 
-@st.cache_data(ttl=ttl_val)
-def load_data(days):
+@st.cache_data(ttl=ttl_val)  # type: ignore[untyped-decorator]
+def load_data(days: int) -> pd.DataFrame:
     try:
         conn = sqlite3.connect("analytics.db")
         # Fetch data within the time window
@@ -112,7 +114,10 @@ df = load_data(days_to_show)
 
 # --- Main Dashboard Layout ---
 if df.empty:
-    st.info("📊 **Awaiting Telemetry...** No data found for the selected time range. Send a message to the webhook to generate analytics.")
+    st.info(
+        "📊 **Awaiting Telemetry...** No data found for the selected time range. "
+        "Send a message to the webhook to generate analytics."
+    )
 else:
     # --- KPI Row ---
     total_messages = len(df)
@@ -126,7 +131,12 @@ else:
     kpi1.metric("⚡ Total Interactions", f"{total_messages:,}")
     kpi2.metric("⏱️ Avg Routing Latency", f"{avg_latency:,.0f} ms")
     kpi3.metric("🧠 Total LLM Tokens", f"{total_tokens:,}")
-    kpi4.metric("👥 Human Handoff Rate", f"{escalation_rate:.1f}%", f"{escalations} sessions" if escalations > 0 else "Optimal", delta_color="inverse")
+    kpi4.metric(
+        "👥 Human Handoff Rate",
+        f"{escalation_rate:.1f}%",
+        f"{escalations} sessions" if escalations > 0 else "Optimal",
+        delta_color="inverse",
+    )
 
     # --- Analytics Charts Row ---
     st.markdown("### 📈 Interaction Telemetry")
@@ -142,15 +152,17 @@ else:
             template="plotly_dark",
             color_discrete_sequence=["#25D366"]
         )
-        fig_latency.update_traces(line_shape='spline', fill='tozeroy', fillcolor='rgba(37, 211, 102, 0.1)', line=dict(width=3))
+        fig_latency.update_traces(
+            line_shape='spline', fill='tozeroy', fillcolor='rgba(37, 211, 102, 0.1)', line={"width": 3}
+        )
         fig_latency.update_layout(
-            margin=dict(l=0, r=0, t=20, b=0),
+            margin={"l": 0, "r": 0, "t": 20, "b": 0},
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
             xaxis_title="",
             yaxis_title="Latency (ms)",
-            xaxis=dict(showgrid=False, zeroline=False),
-            yaxis=dict(showgrid=True, gridcolor='#333', zeroline=False),
+            xaxis={"showgrid": False, "zeroline": False},
+            yaxis={"showgrid": True, "gridcolor": '#333', "zeroline": False},
             hovermode="x unified"
         )
         st.plotly_chart(fig_latency, use_container_width=True)
@@ -169,14 +181,17 @@ else:
                 color_discrete_sequence=px.colors.sequential.Tealgrn
             )
             fig_intents.update_layout(
-                margin=dict(l=0, r=0, t=20, b=0),
+                margin={"l": 0, "r": 0, "t": 20, "b": 0},
                 paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(0,0,0,0)",
                 showlegend=True,
-                legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5)
+                legend={"orientation": "h", "yanchor": "bottom", "y": -0.2, "xanchor": "center", "x": 0.5}
             )
             # Add a center text
-            fig_intents.add_annotation(text=f"<b>{len(intent_counts)}</b><br>Intents", x=0.5, y=0.5, font_size=20, showarrow=False)
+            fig_intents.add_annotation(
+                text=f"<b>{len(intent_counts)}</b><br>Intents",
+                x=0.5, y=0.5, font_size=20, showarrow=False
+            )
             st.plotly_chart(fig_intents, use_container_width=True)
 
     # --- Recent Logs Row ---
@@ -185,8 +200,8 @@ else:
     # Prettify the dataframe before displaying
     display_df = df.sort_values("timestamp", ascending=False).head(100).copy()
     display_df["timestamp"] = display_df["timestamp"].dt.strftime('%Y-%m-%d %H:%M:%S')
-    display_df["escalated"] = display_df["escalated"].map({1: "⚠️ Yes", 0: "✅ No", True: "⚠️ Yes", False: "✅ No"})
-    display_df["used_fallback"] = display_df["used_fallback"].map({1: "⚠️ Yes", 0: "✅ No", True: "⚠️ Yes", False: "✅ No"})
+    display_df["escalated"] = display_df["escalated"].map({1: "⚠️ Yes", 0: "✅ No"})
+    display_df["used_fallback"] = display_df["used_fallback"].map({1: "⚠️ Yes", 0: "✅ No"})
     
     # Rename columns for presentation
     display_df = display_df.rename(columns={
