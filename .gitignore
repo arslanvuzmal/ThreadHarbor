@@ -1,4 +1,3 @@
-```
 # Python
 __pycache__/
 *.py[cod]
@@ -26,4 +25,4 @@ wheels/
 
 # Database
 analytics.db
-```
+.venv/
