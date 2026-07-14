@@ -29,7 +29,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip "setuptools>=83.0.0"
           pip install -e .[dev]
 
       - name: Run Ruff Linter
@@ -62,7 +62,7 @@ jobs:
 
       - name: Install pip-audit
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip "setuptools>=83.0.0"
           pip install pip-audit
 
       - name: Run pip-audit
