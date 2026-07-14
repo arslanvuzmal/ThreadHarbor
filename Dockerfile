@@ -14,13 +14,15 @@ COPY pyproject.toml /app/
 # Create dummy src structure to allow dependencies installation via pip
 RUN mkdir -p /app/src && touch /app/src/__init__.py
 
-RUN pip install --no-cache-dir --upgrade pip setuptools && \
+RUN pip install --no-cache-dir --upgrade pip "setuptools>=83.0.0" && \
     pip install --no-cache-dir .
 
 # Stage 2: Runtime
 FROM python:3.11-slim AS runtime
 
 WORKDIR /app
+
+RUN python -m pip install --no-cache-dir --upgrade pip "setuptools>=83.0.0" wheel
 
 RUN groupadd -g 1000 appuser && \
     useradd -u 1000 -g appuser -m -s /bin/bash appuser
