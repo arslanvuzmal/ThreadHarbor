@@ -1,0 +1,6 @@
+{
+  "name": "OmniRouter WhatsApp Orchestrator",
+  "description": "Enterprise-grade context-aware WhatsApp orchestrator with intelligent triage, PII masking, human handoff, and real-time telemetry command center.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
