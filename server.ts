@@ -335,7 +335,7 @@ app.post('/api/simulate/agent-reply', async (req, res) => {
 
 app.post('/api/simulate/reset', (_req, res) => {
   analyticsStore.resetMetrics();
-  res.json({ status: 'success', message: 'Metrics reseeded successfully' });
+  res.json({ status: 'success', message: 'Metrics cleared' });
 });
 
 // --- VITE MIDDLEWARE / PRODUCTION STATIC SERVING ---

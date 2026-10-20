@@ -8,6 +8,12 @@ interface KpiCardsProps {
 
 export const KpiCards: React.FC<KpiCardsProps> = ({ summary }) => {
   return (
+    <>
+    {summary.sample_data && (
+      <p className="mb-3 inline-block rounded bg-amber-400/15 border border-amber-400/30 px-2 py-1 text-xs font-semibold text-amber-300">
+        Sample data: generated at start-up (SEED_SAMPLE_METRICS=true), not real traffic.
+      </p>
+    )}
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
       
       {/* KPI 1: Total Interactions */}
@@ -22,7 +28,6 @@ export const KpiCards: React.FC<KpiCardsProps> = ({ summary }) => {
           <span className="text-3xl font-extrabold text-white tracking-tight">
             {summary.total_messages.toLocaleString()}
           </span>
-          <span className="text-xs text-emerald-400 font-medium">100% routed</span>
         </div>
         <p className="text-xs text-zinc-500 mt-1">Processed across WhatsApp webhooks</p>
       </div>
@@ -40,7 +45,6 @@ export const KpiCards: React.FC<KpiCardsProps> = ({ summary }) => {
             {summary.avg_latency.toLocaleString()}
             <span className="text-lg font-normal text-zinc-400 ml-1">ms</span>
           </span>
-          <span className="text-xs text-sky-400 font-medium">Sub-second</span>
         </div>
         <p className="text-xs text-zinc-500 mt-1">Triage, masking & LLM response time</p>
       </div>
@@ -57,7 +61,7 @@ export const KpiCards: React.FC<KpiCardsProps> = ({ summary }) => {
           <span className="text-3xl font-extrabold text-white tracking-tight">
             {summary.total_tokens.toLocaleString()}
           </span>
-          <span className="text-xs text-purple-400 font-medium">GPT-4o / Mini</span>
+          <span className="text-xs text-purple-400 font-medium">simulated model</span>
         </div>
         <p className="text-xs text-zinc-500 mt-1">Prompt & completion inference volume</p>
       </div>
@@ -82,5 +86,6 @@ export const KpiCards: React.FC<KpiCardsProps> = ({ summary }) => {
       </div>
 
     </div>
+    </>
   );
 };

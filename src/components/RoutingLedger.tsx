@@ -38,7 +38,7 @@ export const RoutingLedger: React.FC<RoutingLedgerProps> = ({ metrics, onSelectS
               {filteredMetrics.length} Records
             </span>
           </h3>
-          <p className="text-xs text-zinc-400">Complete immutable record of all incoming WhatsApp interactions and routing decisions</p>
+          <p className="text-xs text-zinc-400">Every incoming message and its routing decision (kept in memory; cleared on restart)</p>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">

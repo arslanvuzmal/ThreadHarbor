@@ -26,3 +26,5 @@ wheels/
 # Database
 analytics.db
 .venv/
+
+node_modules/

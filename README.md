@@ -17,9 +17,33 @@
 
 ## 🌟 Executive Summary
 
-Customer support scaling on WhatsApp can quickly become unmanageable without robust automation. **OmniRouter** is an enterprise-grade scaffolding that intelligently triages user requests, utilizes LLM-driven knowledge retrieval (RAG), and seamlessly hands off unresolvable queries to human agents.
+Customer support scaling on WhatsApp can quickly become unmanageable without robust automation. **OmniRouter** (repository: ThreadHarbor) triages WhatsApp messages, masks card numbers, emails and phone numbers, and hands conversations to a human agent when a customer asks for one, when sentiment or a loop says so, or when a policy limit is hit.
 
-It is built with a strictly asynchronous architecture to handle high throughput with minimal resource overhead, ensuring sub-second latencies and strict data privacy.
+It is written as an asynchronous FastAPI service (Python) with a matching Express server and React dashboard (TypeScript) for the demo.
+
+---
+
+## What runs today
+
+- **The reply step is simulated.** No model is called for replies: a set of rules returns fixed answers,
+  reported as model `simulated` with 0 tokens. The one real model call is the optional handoff summary
+  (OpenAI, only when `OPENAI_API_KEY` is set); its input is masked first.
+- **Masking** covers cards (13–19 digits), emails and phone numbers. Names are not masked. The human
+  agent's ticket transcript keeps the original text, because the agent needs it.
+- **Handoff** goes to a mock helpdesk client (`HANDOFF_PROVIDER=mock`) unless one is configured.
+
+## Run the demo (no keys)
+
+```bash
+npm install
+npx tsx server.ts          # http://localhost:3000
+```
+
+Open the **WhatsApp Simulator** tab and press the presets: business hours, the PII masking test, a refund
+over $500 (escalated by the policy limit and turned into a ticket), then reply as the agent. The
+**CCaaS Tickets** and **Analytics** tabs show what happened in this session only. Set
+`SEED_SAMPLE_METRICS=true` to start with generated example history instead; the dashboard then says it
+is sample data.
 
 ---
 
@@ -27,9 +51,9 @@ It is built with a strictly asynchronous architecture to handle high throughput 
 
 | Feature | Description | Stack |
 |:---|:---|:---|
-| 🧠 **Intelligent Triage** | Intent recognition and natural language processing. | `OpenAI` `LangChain` |
+| 🧠 **Triage** | Rule-based triggers for handoff requests, negative sentiment, loops and policy limits. The reply step is simulated (see below). | `Python` `TypeScript` |
 | 📚 **RAG Pipeline** | Semantic search across company knowledge bases. | `Qdrant` `Embeddings` |
-| 🛡️ **Privacy-First** | Zero-trust PII masking (names, cards, emails) before LLM exposure. | `Presidio` / `Regex` |
+| 🛡️ **PII masking** | Card numbers, emails and phone numbers are replaced before the reply step, in handoff summaries and in logs. | `Regex` |
 | 🤝 **Human Handoff** | Context-aware escalation to live human agents. | `Redis` `Orchestrator` |
 | 📊 **Deep Analytics** | Complete traceability, conversation logs, and monitoring. | `Prometheus` `SQLite` |
 | 🐳 **Docker Native** | Out-of-the-box containerization for instant deployment. | `Docker Compose` |

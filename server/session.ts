@@ -23,7 +23,8 @@ class SessionStore {
   private processedMessages: Map<string, number> = new Map();
 
   constructor() {
-    this.seedDefaultSessions();
+    // Example sessions/tickets only with SEED_SAMPLE_METRICS=true; otherwise the desk starts empty.
+    if (process.env.SEED_SAMPLE_METRICS === 'true') this.seedDefaultSessions();
   }
 
   private seedDefaultSessions() {
