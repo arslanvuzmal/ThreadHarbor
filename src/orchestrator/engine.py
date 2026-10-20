@@ -14,6 +14,7 @@ from src.handoff.payload import build_payload
 from src.intelligence.tracing import trace_llm_call
 from src.orchestrator.fallback import FallbackEngine
 from src.orchestrator.triggers import EscalationTriggerEngine
+from src.utils import pii_masker
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -280,9 +281,12 @@ class Orchestrator:
 
         # 3. CALL LLM (Wrapped with Tracing and Graceful Degradation)
         try:
-            async with trace_llm_call(session_id, text) as span:
+            # The model step gets the masked text: card numbers, emails and phone numbers are
+            # replaced before anything leaves the service (they used to be masked in logs only).
+            masked = pii_masker.mask(text)
+            async with trace_llm_call(session_id, masked) as span:
                 response_text, tool_calls, model_used, tokens_used = await self.call_llm(
-                    text,
+                    masked,
                     session,
                     media_bytes=media_bytes,
                     mime_type=mime_type,

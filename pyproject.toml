@@ -38,6 +38,8 @@ dashboard = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Tests import the application as `src.…`; editable installs do not put the repository root on the path.
+pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.ruff]

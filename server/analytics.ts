@@ -10,12 +10,16 @@ export interface MetricRecord {
   escalated: boolean;
 }
 
+// Random history makes the dashboard look busy, but none of it happened. It is off unless
+// SEED_SAMPLE_METRICS=true, and the dashboard then says it is sample data.
+const SAMPLE_METRICS = process.env.SEED_SAMPLE_METRICS === 'true';
+
 class AnalyticsStore {
   private metrics: MetricRecord[] = [];
   private idCounter = 1;
 
   constructor() {
-    this.seedHistoricalMetrics();
+    if (SAMPLE_METRICS) this.seedHistoricalMetrics();
   }
 
   private seedHistoricalMetrics() {
@@ -32,7 +36,7 @@ class AnalyticsStore {
       'success_bot_chat'
     ];
 
-    const models = ['gpt-4o-mini', 'gpt-4o', null];
+    const models = ['simulated', null];
     const now = Date.now();
 
     // Generate ~60 realistic telemetry events over the past 7 days
@@ -50,7 +54,7 @@ class AnalyticsStore {
         : Math.floor(Math.random() * 450) + 180;
 
       const tokens = isFallback ? 0 : Math.floor(Math.random() * 120) + 35;
-      const model = isFallback ? null : (tokens > 100 ? 'gpt-4o' : 'gpt-4o-mini');
+      const model = isFallback ? null : 'simulated';
 
       this.metrics.push({
         id: this.idCounter++,
@@ -101,6 +105,7 @@ class AnalyticsStore {
         escalation_rate: 0,
         fallbacks: 0,
         fallback_rate: 0,
+        sample_data: SAMPLE_METRICS,
       };
     }
 
@@ -119,13 +124,14 @@ class AnalyticsStore {
       escalation_rate,
       fallbacks,
       fallback_rate,
+      sample_data: SAMPLE_METRICS,
     };
   }
 
   public resetMetrics() {
     this.metrics = [];
     this.idCounter = 1;
-    this.seedHistoricalMetrics();
+    if (SAMPLE_METRICS) this.seedHistoricalMetrics();
   }
 }
 

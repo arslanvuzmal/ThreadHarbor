@@ -31,7 +31,7 @@ export class Orchestrator {
     const startTime = Date.now();
     let usedFallback = false;
     let escalated = false;
-    let modelUsed: string | null = "gpt-4o-mini";
+    let modelUsed: string | null = "simulated";
     let tokensUsed = 0;
     let intent = "success_bot_chat";
 
@@ -149,7 +149,9 @@ export class Orchestrator {
     let toolCalls: Array<{ name: string; arguments?: any }> | null = null;
 
     try {
-      const llmResult = await this.callLLM(rawText, mediaBytesBase64, mimeType);
+      // The model step gets the masked text (it used to receive the raw message; masking only
+      // covered the logs). Triggers and the human agent still see the original.
+      const llmResult = await this.callLLM(maskedText, mediaBytesBase64, mimeType);
       responseText = llmResult.text;
       toolCalls = llmResult.toolCalls;
       modelUsed = llmResult.model;
@@ -329,18 +331,17 @@ export class Orchestrator {
     mimeType?: string
   ): Promise<{ text: string; toolCalls: Array<{ name: string; arguments?: any }> | null; model: string; tokens: number }> {
     const textLower = text.toLowerCase();
-    let model = "gpt-4o-mini";
-    let tokens = 45;
+    // No model is called: replies come from the rules below. Reported as "simulated", 0 tokens.
+    const model = "simulated";
+    const tokens = 0;
 
     if (textLower.includes("force error")) {
       throw new Error("Simulated internal service error (LLM/RAG failure)");
     }
 
     if (mediaBytesBase64 && mimeType?.startsWith("image/")) {
-      model = "gpt-4o";
-      tokens = 110;
       return {
-        text: "I have analyzed your uploaded image using GPT-4o Vision. The receipt and order details look valid.",
+        text: "Image received. In this demo the model step is simulated, so the image is not analysed.",
         toolCalls: null,
         model,
         tokens
@@ -348,9 +349,8 @@ export class Orchestrator {
     }
 
     if (mediaBytesBase64 && mimeType === "application/pdf") {
-      tokens = 85;
       return {
-        text: `I have parsed your uploaded PDF document. Extracted content has been cross-referenced with your account.`,
+        text: `PDF received. In this demo the model step is simulated, so the document is not read.`,
         toolCalls: null,
         model,
         tokens
@@ -362,16 +362,21 @@ export class Orchestrator {
         text: "I don't know the exact answer to this specific inquiry.",
         toolCalls: null,
         model,
-        tokens: 30
+        tokens
       };
     }
 
-    if (textLower.includes("force refund trigger") || (textLower.includes("refund") && (textLower.includes("500") || textLower.includes("600") || textLower.includes("1000")))) {
+    // A refund request becomes an initiate_refund tool call for the amount in the message; the
+    // policy trigger then decides (over 500 escalates). It used to look for the strings "500",
+    // "600" or "1000", so the "$650.00" preset never reached the policy.
+    const amountMatch = text.match(/\$?\s?(\d+(?:[.,]\d{1,2})?)/);
+    const amount = amountMatch ? parseFloat(amountMatch[1].replace(",", ".")) : NaN;
+    if (textLower.includes("force refund trigger") || (textLower.includes("refund") && !isNaN(amount))) {
       return {
         text: "Initiating refund review with supervisor authorization.",
-        toolCalls: [{ name: "initiate_refund", arguments: { amount: 650.0 } }],
+        toolCalls: [{ name: "initiate_refund", arguments: { amount: textLower.includes("force refund trigger") ? 650.0 : amount } }],
         model,
-        tokens: 60
+        tokens
       };
     }
 
@@ -380,7 +385,7 @@ export class Orchestrator {
         text: "Your order #89421 is currently in transit with express carrier. Estimated delivery is tomorrow by 4:00 PM.",
         toolCalls: null,
         model,
-        tokens: 52
+        tokens
       };
     }
 
@@ -389,7 +394,7 @@ export class Orchestrator {
         text: "Our customer support team is available Monday through Friday from 9 AM to 5 PM EST. How can I assist you further?",
         toolCalls: null,
         model,
-        tokens: 44
+        tokens
       };
     }
 

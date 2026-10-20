@@ -18,6 +18,8 @@ export interface KpiSummary {
   escalation_rate: number;
   fallbacks: number;
   fallback_rate: number;
+  /** True when the history was generated at start-up (SEED_SAMPLE_METRICS=true). */
+  sample_data?: boolean;
 }
 
 export interface SessionData {

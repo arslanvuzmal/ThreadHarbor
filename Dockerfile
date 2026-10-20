@@ -34,6 +34,10 @@ ENV PYTHONUNBUFFERED=1 \
 COPY --from=builder /app/.venv /app/.venv
 COPY src/ /app/src/
 
+# The service never installs anything at run time. pip carries its own copies of msgpack, urllib3
+# and setuptools, older than the fixed versions, and the image scan fails on them.
+RUN /app/.venv/bin/python -m pip uninstall -y pip && /usr/local/bin/python -m pip uninstall -y pip
+
 RUN chown -R appuser:appuser /app
 
 USER appuser

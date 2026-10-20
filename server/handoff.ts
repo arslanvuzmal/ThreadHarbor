@@ -1,4 +1,5 @@
 import { logger } from './logger';
+import { maskPII } from './pii';
 import { SessionRecord } from './session';
 
 export interface ZendeskTicketRecord {
@@ -22,7 +23,8 @@ class MockZendeskHandoffClient {
   private ticketCounter = 101;
 
   constructor() {
-    this.seedDefaultTickets();
+    // Example sessions/tickets only with SEED_SAMPLE_METRICS=true; otherwise the desk starts empty.
+    if (process.env.SEED_SAMPLE_METRICS === 'true') this.seedDefaultTickets();
   }
 
   private seedDefaultTickets() {
@@ -97,7 +99,8 @@ class MockZendeskHandoffClient {
   }
 
   private generateSummary(transcript: Array<{ role: string; content: string }>, reason: string): string {
-    const lastMsg = transcript.slice(-3).map(m => m.content).join('; ');
+    // The summary is described as PII-masked; it used to quote the raw messages, card numbers included.
+    const lastMsg = transcript.slice(-3).map(m => maskPII(m.content)).join('; ');
     return `Customer escalated due to: ${reason}. Recent context: "${lastMsg.slice(0, 150)}..."`;
   }
 }

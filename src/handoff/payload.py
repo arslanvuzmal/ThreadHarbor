@@ -5,6 +5,7 @@ import httpx
 from pydantic import BaseModel
 
 from src.bot.session import SessionData
+from src.utils import pii_masker
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -31,7 +32,11 @@ async def generate_summary(transcript: list[dict[str, Any]]) -> str:
         A 2-sentence string summary of the conversation.
     """
     last_10 = transcript[-10:]
-    formatted_chat = "\n".join([f"{msg.get('role', 'unknown')}: {msg.get('content', '')}" for msg in last_10])
+    # Masked before it leaves the service: this text is sent to OpenAI when a key is configured,
+    # and it used to include card numbers, emails and phone numbers as typed.
+    formatted_chat = "\n".join(
+        [f"{msg.get('role', 'unknown')}: {pii_masker.mask(str(msg.get('content', '')))}" for msg in last_10]
+    )
 
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
